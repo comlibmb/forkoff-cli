@@ -1,0 +1,704 @@
+#!/usr/bin/env node
+
+import { Command } from 'commander';
+import chalk from 'chalk';
+import ora from 'ora';
+import qrcode from 'qrcode-terminal';
+import { config } from './config';
+import { api } from './api';
+import { wsClient } from './websocket';
+import { terminalManager } from './terminal';
+import { approvalManager } from './approval';
+import { toolDetector, claudeHooksManager, claudeSessionDetector, claudeProcessManager } from './tools';
+import { transcriptStreamer } from './transcript-streamer';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+
+const program = new Command();
+
+program
+  .name('forkoff')
+  .description('CLI tool for ForkOff - Connect your AI coding tools to mobile')
+  .version('1.0.0');
+
+// Configure API/WS URLs
+program
+  .command('config')
+  .description('Configure ForkOff CLI settings')
+  .option('-a, --api <url>', 'Set API URL')
+  .option('-w, --ws <url>', 'Set WebSocket URL')
+  .option('-n, --name <name>', 'Set device name')
+  .option('--show', 'Show current configuration')
+  .option('--reset', 'Reset all configuration')
+  .action(async (options) => {
+    if (options.reset) {
+      config.reset();
+      console.log(chalk.green('Configuration reset successfully'));
+      return;
+    }
+
+    if (options.api) {
+      config.apiUrl = options.api;
+      console.log(chalk.green(`API URL set to: ${options.api}`));
+    }
+
+    if (options.ws) {
+      config.wsUrl = options.ws;
+      console.log(chalk.green(`WebSocket URL set to: ${options.ws}`));
+    }
+
+    if (options.name) {
+      config.deviceName = options.name;
+      console.log(chalk.green(`Device name set to: ${options.name}`));
+    }
+
+    if (options.show || (!options.api && !options.ws && !options.name && !options.reset)) {
+      console.log(chalk.bold('\nCurrent Configuration:'));
+      console.log(`  API URL:     ${chalk.cyan(config.apiUrl)}`);
+      console.log(`  WebSocket:   ${chalk.cyan(config.wsUrl)}`);
+      console.log(`  Device Name: ${chalk.cyan(config.deviceName)}`);
+      console.log(`  Device ID:   ${chalk.cyan(config.deviceId || 'Not registered')}`);
+      console.log(`  Paired:      ${config.isPaired ? chalk.green('Yes') : chalk.yellow('No')}`);
+      console.log(`  Config Path: ${chalk.dim(config.getPath())}`);
+    }
+  });
+
+// Pair device with mobile app
+program
+  .command('pair')
+  .description('Generate pairing code to connect with mobile app')
+  .action(async () => {
+    const spinner = ora('Connecting to ForkOff server...').start();
+
+    try {
+      // Check server health
+      const isHealthy = await api.healthCheck();
+      if (!isHealthy) {
+        spinner.fail('Cannot connect to ForkOff server');
+        console.log(chalk.yellow(`\nMake sure the server is running at ${config.apiUrl}`));
+        console.log(chalk.dim('Use "forkoff config --api <url>" to change the server URL'));
+        return;
+      }
+
+      spinner.text = 'Registering device...';
+
+      // Register device or refresh pairing code
+      let result;
+      if (config.deviceId) {
+        try {
+          result = await api.refreshPairingCode(config.deviceId);
+        } catch {
+          // Device might not exist anymore, register fresh
+          result = await api.registerDevice();
+        }
+      } else {
+        result = await api.registerDevice();
+      }
+
+      // Save device info
+      config.deviceId = result.device.id;
+      config.pairingCode = result.pairingCode;
+
+      spinner.succeed('Device registered successfully!\n');
+
+      // Display pairing info
+      console.log(chalk.bold('Scan this QR code with the ForkOff mobile app:\n'));
+
+      // Generate QR code with pairing URL
+      const pairingUrl = `forkoff://pair/${result.pairingCode}`;
+      qrcode.generate(pairingUrl, { small: true }, (code) => {
+        console.log(code);
+      });
+
+      console.log(chalk.bold('\nOr enter this code manually:\n'));
+      console.log(chalk.bgBlue.white.bold(`  ${result.pairingCode}  `));
+      console.log();
+
+      const expiresAt = new Date(result.expiresAt);
+      console.log(chalk.dim(`Code expires at: ${expiresAt.toLocaleTimeString()}`));
+      console.log();
+
+      // Wait for pairing
+      console.log(chalk.yellow('Waiting for mobile app to scan...'));
+      console.log(chalk.dim('Press Ctrl+C to cancel\n'));
+
+      await waitForPairing(result.device.id);
+
+      // Auto-connect after successful pairing
+      await startConnection();
+    } catch (error: any) {
+      spinner.fail('Failed to register device');
+      console.error(chalk.red(error.message || 'Unknown error'));
+    }
+  });
+
+// Check device status
+program
+  .command('status')
+  .description('Check device connection status')
+  .action(async () => {
+    if (!config.deviceId) {
+      console.log(chalk.yellow('Device not registered. Run "forkoff pair" first.'));
+      return;
+    }
+
+    const spinner = ora('Checking status...').start();
+
+    try {
+      const status = await api.checkPairingStatus(config.deviceId);
+
+      spinner.stop();
+
+      console.log(chalk.bold('\nDevice Status:'));
+      console.log(`  Device ID:   ${chalk.cyan(config.deviceId)}`);
+      console.log(`  Device Name: ${chalk.cyan(config.deviceName)}`);
+      console.log(`  Paired:      ${status.isPaired ? chalk.green('Yes') : chalk.yellow('No')}`);
+
+      if (status.isPaired) {
+        config.userId = status.userId;
+        config.pairedAt = config.pairedAt || new Date().toISOString();
+        console.log(`  User ID:     ${chalk.cyan(status.userId)}`);
+      }
+
+      if (wsClient.isConnected) {
+        console.log(`  WebSocket:   ${chalk.green('Connected')}`);
+      } else {
+        console.log(`  WebSocket:   ${chalk.yellow('Disconnected')}`);
+      }
+    } catch (error: any) {
+      spinner.fail('Failed to check status');
+      console.error(chalk.red(error.message || 'Unknown error'));
+    }
+  });
+
+// Connect and stay online (for returning users who already paired)
+program
+  .command('connect')
+  .description('Reconnect to ForkOff (for previously paired devices)')
+  .action(async () => {
+    if (!config.deviceId) {
+      console.log(chalk.yellow('Device not registered. Run "forkoff pair" first.'));
+      return;
+    }
+
+    if (!config.isPaired) {
+      console.log(chalk.yellow('Device not paired. Run "forkoff pair" and scan the QR code.'));
+      return;
+    }
+
+    await startConnection();
+  });
+
+// Disconnect/unpair device
+program
+  .command('disconnect')
+  .description('Disconnect and unpair device')
+  .action(async () => {
+    wsClient.disconnect();
+    config.userId = null;
+    config.pairedAt = null;
+    config.pairingCode = null;
+
+    console.log(chalk.green('Device disconnected and unpaired.'));
+    console.log(chalk.dim('Run "forkoff pair" to pair again.'));
+  });
+
+// Detect and manage AI coding tools
+program
+  .command('tools')
+  .description('Detect and manage AI coding tools')
+  .option('-d, --detect', 'Detect installed AI tools')
+  .option('-i, --install-hooks', 'Install ForkOff hooks for Claude Code')
+  .option('-u, --uninstall-hooks', 'Remove ForkOff hooks from Claude Code')
+  .option('-w, --watch', 'Watch tool status changes')
+  .action(async (options) => {
+    if (options.installHooks) {
+      const spinner = ora('Installing Claude Code hooks...').start();
+      try {
+        if (!claudeHooksManager.canConfigure()) {
+          spinner.fail('Claude Code not found');
+          console.log(chalk.yellow('\nClaude Code must be installed to use hooks.'));
+          console.log(chalk.dim('Install Claude Code from: https://claude.ai/download'));
+          return;
+        }
+
+        await claudeHooksManager.installHooks();
+        spinner.succeed('Claude Code hooks installed!');
+        console.log(chalk.green('\nForkOff will now receive events from Claude Code.'));
+        console.log(chalk.dim('Run "forkoff connect" to start receiving events.'));
+      } catch (error: any) {
+        spinner.fail('Failed to install hooks');
+        console.error(chalk.red(error.message));
+      }
+      return;
+    }
+
+    if (options.uninstallHooks) {
+      const spinner = ora('Removing Claude Code hooks...').start();
+      try {
+        await claudeHooksManager.uninstallHooks();
+        spinner.succeed('Claude Code hooks removed!');
+      } catch (error: any) {
+        spinner.fail('Failed to remove hooks');
+        console.error(chalk.red(error.message));
+      }
+      return;
+    }
+
+    if (options.watch) {
+      console.log(chalk.bold('\nWatching for tool status changes...'));
+      console.log(chalk.dim('Press Ctrl+C to stop\n'));
+
+      toolDetector.watchToolStatus((tools) => {
+        console.log(chalk.cyan(`[${new Date().toLocaleTimeString()}] Tool status update:`));
+        tools.forEach(tool => {
+          const statusColor = tool.status === 'running' ? chalk.green :
+                             tool.status === 'configured' ? chalk.yellow : chalk.dim;
+          console.log(`  ${tool.name}: ${statusColor(tool.status)}`);
+        });
+        console.log();
+      }, 3000);
+
+      // Keep alive
+      await new Promise(() => {});
+      return;
+    }
+
+    // Default: detect tools
+    const spinner = ora('Detecting AI coding tools...').start();
+
+    try {
+      const result = await toolDetector.detectAll();
+      spinner.stop();
+
+      console.log(chalk.bold('\nDetected AI Coding Tools:\n'));
+
+      if (result.tools.length === 0) {
+        console.log(chalk.yellow('  No AI coding tools detected.'));
+        console.log(chalk.dim('\n  Supported tools:'));
+        console.log(chalk.dim('    - Claude Code (https://claude.ai/download)'));
+        console.log(chalk.dim('    - Cursor (https://cursor.sh)'));
+        console.log(chalk.dim('    - GitHub Copilot (VS Code extension)'));
+        console.log(chalk.dim('    - Continue.dev (VS Code extension)'));
+      } else {
+        result.tools.forEach(tool => {
+          const statusIcon = tool.status === 'running' ? chalk.green('●') :
+                            tool.status === 'configured' ? chalk.yellow('○') :
+                            chalk.dim('○');
+
+          console.log(`  ${statusIcon} ${chalk.bold(tool.name)}`);
+          console.log(`    Type:    ${chalk.cyan(tool.type)}`);
+          if (tool.version) {
+            console.log(`    Version: ${chalk.dim(tool.version)}`);
+          }
+          if (tool.path) {
+            console.log(`    Path:    ${chalk.dim(tool.path)}`);
+          }
+          console.log(`    Status:  ${
+            tool.status === 'running' ? chalk.green('Running') :
+            tool.status === 'configured' ? chalk.yellow('Configured') :
+            chalk.dim('Detected')
+          }`);
+
+          // Check if hooks are configured for Claude Code
+          if (tool.type === 'claude-code') {
+            const hooksConfigured = claudeHooksManager.isHookConfigured();
+            console.log(`    Hooks:   ${
+              hooksConfigured ? chalk.green('Installed') : chalk.yellow('Not installed')
+            }`);
+            if (!hooksConfigured) {
+              console.log(chalk.dim('             Run "forkoff tools --install-hooks" to enable'));
+            }
+          }
+          console.log();
+        });
+      }
+
+      console.log(chalk.dim(`Platform: ${result.platform}`));
+    } catch (error: any) {
+      spinner.fail('Tool detection failed');
+      console.error(chalk.red(error.message));
+    }
+  });
+
+// Helper function to start connection and set up event handlers
+async function startConnection(): Promise<void> {
+  const spinner = ora('Connecting to ForkOff...').start();
+
+  try {
+    await wsClient.connect();
+    spinner.succeed('Connected to ForkOff!\n');
+
+    // Detect and report connected tools
+    spinner.start('Detecting AI coding tools...');
+    try {
+      const toolResult = await toolDetector.detectAll();
+      if (toolResult.tools.length > 0) {
+        const toolsToReport = toolResult.tools.map(tool => ({
+          type: tool.type,
+          name: tool.name,
+          version: tool.version || null,
+        }));
+
+        await api.reportConnectedTools(config.deviceId!, toolsToReport);
+        spinner.succeed(`Detected ${toolResult.tools.length} AI tool(s): ${toolResult.tools.map(t => t.name).join(', ')}`);
+      } else {
+        spinner.info('No AI coding tools detected');
+      }
+    } catch (toolError: any) {
+      spinner.warn('Tool detection skipped: ' + (toolError.message || 'unknown error'));
+    }
+
+    console.log();
+    console.log(chalk.green('Device is now online and ready to receive commands.'));
+    console.log(chalk.dim('Press Ctrl+C to disconnect\n'));
+
+    // Set up terminal output forwarding
+    terminalManager.on('output', (data) => {
+      wsClient.sendTerminalOutput(data);
+    });
+
+    terminalManager.on('cwd_changed', (data) => {
+      wsClient.sendTerminalCwd(data);
+    });
+
+    // When a session is auto-created (command received before terminal_create), send the cwd
+    terminalManager.on('session_created', (data) => {
+      console.log(chalk.dim(`[Terminal] Session auto-created: ${data.terminalSessionId} at ${data.cwd}`));
+      wsClient.sendTerminalCwd({
+        terminalSessionId: data.terminalSessionId,
+        cwd: data.cwd,
+      });
+    });
+
+    // Set up terminal create handler
+    wsClient.on('terminal_create', (data: any) => {
+      console.log(chalk.blue(`[Terminal] Creating session: ${data.terminalSessionId}`));
+
+      // Resolve the cwd (~ to home directory)
+      let resolvedCwd = data.cwd || process.cwd();
+      if (resolvedCwd === '~' || resolvedCwd.startsWith('~/')) {
+        const homedir = require('os').homedir();
+        resolvedCwd = resolvedCwd === '~' ? homedir : resolvedCwd.replace('~', homedir);
+      }
+
+      // Create the session
+      const session = terminalManager.createSession(data.terminalSessionId, resolvedCwd);
+
+      // Send back the resolved cwd
+      wsClient.sendTerminalCwd({
+        terminalSessionId: data.terminalSessionId,
+        cwd: session.cwd,
+      });
+
+      console.log(chalk.dim(`[Terminal] Session created with cwd: ${session.cwd}`));
+    });
+
+    // Set up event handlers
+    wsClient.on('terminal_command', async (data) => {
+      // Check if this is a Claude terminal session
+      if (claudeProcessManager.isClaudeSession(data.terminalSessionId)) {
+        console.log(chalk.cyan(`[Claude] Input: ${data.command.substring(0, 50)}${data.command.length > 50 ? '...' : ''}`));
+        claudeProcessManager.sendInput(data.terminalSessionId, data.command);
+        return;
+      }
+
+      // Regular terminal command
+      console.log(chalk.blue(`[Terminal] Executing: ${data.command}`));
+      try {
+        const result = await terminalManager.executeCommand(
+          data.terminalSessionId,
+          data.command
+        );
+        console.log(chalk.dim(`[Terminal] Exit code: ${result.exitCode}`));
+      } catch (error: any) {
+        console.error(chalk.red(`[Terminal] Error: ${error.message}`));
+      }
+    });
+
+    wsClient.on('approval_response', (data) => {
+      console.log(chalk.blue(`[Approval] ${data.status}: ${data.approvalId}`));
+      approvalManager.handleApprovalResponse(data.approvalId, data.status);
+    });
+
+    // Set up Claude session detection
+    if (claudeSessionDetector.isClaudeInstalled()) {
+      console.log(chalk.cyan('[Claude] Scanning for Claude sessions...'));
+
+      // Attach event listeners BEFORE starting to watch (so we catch initial events)
+      claudeSessionDetector.on('session_detected', (session) => {
+        console.log(chalk.cyan(`[Claude] New session detected: ${session.directory}`));
+        wsClient.sendClaudeSessionUpdate(session);
+      });
+
+      claudeSessionDetector.on('session_changed', (session) => {
+        console.log(chalk.dim(`[Claude] Session updated: ${session.directory} (${session.state})`));
+        wsClient.sendClaudeSessionUpdate(session);
+      });
+
+      claudeSessionDetector.on('claude_running_changed', (isRunning) => {
+        console.log(chalk.cyan(`[Claude] Claude is now ${isRunning ? 'ACTIVE' : 'inactive'}`));
+        wsClient.sendToolStatusUpdate('claude_code', isRunning ? 'active' : 'inactive');
+      });
+
+      // Scan and report existing sessions
+      const sessions = claudeSessionDetector.scanSessions();
+      if (sessions.length > 0) {
+        console.log(chalk.cyan(`[Claude] Found ${sessions.length} session(s)`));
+
+        // Update session states based on file modification time before sending
+        const now = Date.now();
+        let hasActiveSession = false;
+        for (const session of sessions) {
+          const sessionTime = new Date(session.lastUsedAt).getTime();
+          if (now - sessionTime < 60000) {
+            session.state = 'active';
+            hasActiveSession = true;
+          }
+        }
+
+        wsClient.sendClaudeSessions(sessions);
+
+        if (hasActiveSession) {
+          console.log(chalk.cyan(`[Claude] Claude is now ACTIVE`));
+          wsClient.sendToolStatusUpdate('claude_code', 'active');
+        }
+      }
+
+      // Start watching for session changes
+      claudeSessionDetector.startWatching(5000);
+    }
+
+    // Log approval events
+    approvalManager.on('approved', (approval) => {
+      console.log(chalk.green(`[Approval] Approved: ${approval.description}`));
+    });
+
+    approvalManager.on('rejected', (approval) => {
+      console.log(chalk.red(`[Approval] Rejected: ${approval.description}`));
+    });
+
+    wsClient.on('git_clone', async (data) => {
+      console.log(chalk.blue(`[Git] Clone request: ${data.repo.fullName}`));
+      try {
+        const result = await terminalManager.executeCommand(
+          `git-clone-${Date.now()}`,
+          data.command
+        );
+        console.log(chalk.green(`[Git] Clone completed with exit code: ${result.exitCode}`));
+      } catch (error: any) {
+        console.error(chalk.red(`[Git] Clone failed: ${error.message}`));
+      }
+    });
+
+    // Handle Claude start session request from mobile
+    wsClient.on('claude_start_session', async (data: any) => {
+      console.log(chalk.cyan(`[Claude] Start session request: ${data.directory}`));
+      try {
+        const result = await claudeProcessManager.startSession(data.directory, data.terminalSessionId);
+
+        wsClient.sendToolStatusUpdate('claude_code', 'active');
+        wsClient.sendTerminalCwd({ terminalSessionId: data.terminalSessionId, cwd: result.cwd });
+
+        console.log(chalk.green(`[Claude] Session started: ${data.terminalSessionId}`));
+      } catch (error: any) {
+        console.error(chalk.red(`[Claude] Failed to start: ${error.message}`));
+      }
+    });
+
+    // Handle Claude resume session request from mobile
+    wsClient.on('claude_resume_session', async (data: any) => {
+      console.log(chalk.cyan(`[Claude] Resume session request: ${data.sessionKey} in ${data.directory}`));
+      try {
+        const result = await claudeProcessManager.resumeSession(data.sessionKey, data.directory, data.terminalSessionId);
+
+        wsClient.sendToolStatusUpdate('claude_code', 'active');
+        wsClient.sendClaudeSessionUpdate({
+          sessionKey: data.sessionKey,
+          directory: data.directory,
+          state: 'active',
+          lastUsedAt: new Date().toISOString(),
+        });
+        wsClient.sendTerminalCwd({ terminalSessionId: data.terminalSessionId, cwd: result.cwd });
+
+        console.log(chalk.green(`[Claude] Session resumed: ${data.terminalSessionId}`));
+      } catch (error: any) {
+        console.error(chalk.red(`[Claude] Failed to resume: ${error.message}`));
+      }
+    });
+
+    // Handle directory listing requests
+    wsClient.on('directory_list', async (data: any) => {
+      console.log(chalk.dim(`[Dir] Listing: ${data.path}`));
+      try {
+        let resolvedPath = data.path;
+        if (resolvedPath === '~' || resolvedPath.startsWith('~/')) {
+          resolvedPath = resolvedPath === '~' ? os.homedir() : resolvedPath.replace('~', os.homedir());
+        }
+
+        const entries = fs.readdirSync(resolvedPath, { withFileTypes: true })
+          .filter(entry => !entry.name.startsWith('.'))
+          .map(entry => ({
+            name: entry.name,
+            type: entry.isDirectory() ? 'directory' as const : 'file' as const,
+            path: path.join(resolvedPath, entry.name),
+          }))
+          .sort((a, b) => {
+            if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+            return a.name.localeCompare(b.name);
+          });
+
+        wsClient.sendDirectoryListResponse({ requestId: data.requestId, entries, currentPath: resolvedPath });
+      } catch (error: any) {
+        console.error(chalk.red(`[Dir] Error: ${error.message}`));
+        wsClient.sendDirectoryListResponse({ requestId: data.requestId, entries: [], currentPath: data.path });
+      }
+    });
+
+    // Handle transcript fetch requests from mobile
+    wsClient.on('transcript_fetch', async (data: any) => {
+      console.log(chalk.dim(`[Transcript] Fetching: ${data.sessionKey}, offset: ${data.offset}, limit: ${data.limit}, reverse: ${data.reverse}`));
+      try {
+        const result = await transcriptStreamer.fetchHistory(
+          data.transcriptPath,
+          data.offset || 0,
+          data.limit || 100,
+          data.reverse !== false // Default to true (most recent first)
+        );
+        wsClient.sendTranscriptHistory({
+          sessionKey: data.sessionKey,
+          ...result,
+          offset: data.offset || 0,
+        });
+      } catch (error: any) {
+        console.error(chalk.red(`[Transcript] Error: ${error.message}`));
+      }
+    });
+
+    // Handle transcript subscribe
+    wsClient.on('transcript_subscribe', (data: any) => {
+      console.log(chalk.dim(`[Transcript] Subscribing: ${data.sessionKey}`));
+      transcriptStreamer.subscribeToUpdates(data.sessionKey, data.transcriptPath);
+    });
+
+    // Handle transcript unsubscribe
+    wsClient.on('transcript_unsubscribe', (data: any) => {
+      console.log(chalk.dim(`[Transcript] Unsubscribing: ${data.sessionKey}`));
+      transcriptStreamer.unsubscribeFromUpdates(data.sessionKey);
+    });
+
+    // Handle claude sessions request - mobile app wants current sessions
+    wsClient.on('claude_sessions_request', () => {
+      console.log(chalk.cyan(`[Claude] Sessions requested by mobile`));
+      if (claudeSessionDetector.isClaudeInstalled()) {
+        const sessions = claudeSessionDetector.scanSessions();
+        const now = Date.now();
+        let hasActiveSession = false;
+
+        // Update session states based on file modification time
+        for (const session of sessions) {
+          const sessionTime = new Date(session.lastUsedAt).getTime();
+          if (now - sessionTime < 60000) {
+            session.state = 'active';
+            hasActiveSession = true;
+          }
+        }
+
+        // Send sessions
+        if (sessions.length > 0) {
+          wsClient.sendClaudeSessions(sessions);
+        }
+
+        // Send tool status
+        wsClient.sendToolStatusUpdate('claude_code', hasActiveSession ? 'active' : 'inactive');
+      }
+    });
+
+    // Forward live transcript updates to WebSocket
+    transcriptStreamer.on('update', (data: any) => {
+      console.log(chalk.green(`[Transcript] Sending update for ${data.sessionKey}: ${data.entry?.type}`));
+      wsClient.sendTranscriptUpdate(data);
+    });
+
+    // Forward Claude process output to WebSocket
+    claudeProcessManager.on('output', (data: any) => {
+      wsClient.sendTerminalOutput(data);
+    });
+
+    // Handle Claude process end
+    claudeProcessManager.on('session_ended', (data: any) => {
+      console.log(chalk.dim(`[Claude] Session ended: ${data.terminalSessionId}`));
+      wsClient.sendToolStatusUpdate('claude_code', 'inactive');
+      if (data.sessionKey) {
+        wsClient.sendClaudeSessionUpdate({
+          sessionKey: data.sessionKey,
+          directory: data.directory,
+          state: 'inactive',
+          lastUsedAt: new Date().toISOString(),
+        });
+      }
+    });
+
+    wsClient.on('disconnected', (reason) => {
+      console.log(chalk.yellow(`\nDisconnected: ${reason}`));
+      if (reason !== 'io client disconnect') {
+        console.log(chalk.dim('Attempting to reconnect...'));
+      }
+    });
+
+    wsClient.on('error', (error) => {
+      console.error(chalk.red(`Connection error: ${error.message}`));
+    });
+
+    // Keep the process running
+    process.on('SIGINT', () => {
+      console.log(chalk.yellow('\nDisconnecting...'));
+      claudeSessionDetector.stopWatching();
+      transcriptStreamer.cleanup();
+      wsClient.disconnect();
+      process.exit(0);
+    });
+
+    // Keep alive
+    await new Promise(() => {});
+  } catch (error: any) {
+    spinner.fail('Failed to connect');
+    console.error(chalk.red(error.message || 'Unknown error'));
+  }
+}
+
+// Helper function to wait for pairing
+async function waitForPairing(deviceId: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const checkInterval = setInterval(async () => {
+      try {
+        const status = await api.checkPairingStatus(deviceId);
+
+        if (status.isPaired) {
+          clearInterval(checkInterval);
+          config.userId = status.userId;
+          config.pairedAt = new Date().toISOString();
+
+          console.log(chalk.green('\n✓ Device paired successfully!'));
+          console.log(chalk.dim('\nConnecting to receive commands...\n'));
+
+          // Auto-connect after successful pairing
+          resolve();
+        }
+      } catch (error) {
+        // Continue waiting
+      }
+    }, 2000);
+
+    // Handle Ctrl+C
+    process.on('SIGINT', () => {
+      clearInterval(checkInterval);
+      console.log(chalk.yellow('\nPairing cancelled.'));
+      process.exit(0);
+    });
+  });
+}
+
+// Run the CLI
+program.parse();
