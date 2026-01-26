@@ -52,7 +52,13 @@ class ClaudeProcessManager extends events_1.EventEmitter {
      */
     async startSession(directory, terminalSessionId) {
         const resolvedDir = this.resolvePath(directory);
-        const proc = (0, child_process_1.spawn)('claude', [], {
+        // SDK flags for structured JSON communication
+        const args = [
+            '--output-format', 'stream-json', // JSONL output from Claude
+            '--input-format', 'stream-json', // JSONL input to Claude
+            '--verbose', // Complete messages
+        ];
+        const proc = (0, child_process_1.spawn)('claude', args, {
             cwd: resolvedDir,
             env: { ...process.env, TERM: 'xterm-256color' },
             shell: true,
@@ -67,7 +73,15 @@ class ClaudeProcessManager extends events_1.EventEmitter {
      */
     async resumeSession(sessionKey, directory, terminalSessionId) {
         const resolvedDir = this.resolvePath(directory);
-        const proc = (0, child_process_1.spawn)('claude', ['--resume'], {
+        // SDK flags for structured JSON communication
+        const args = [
+            '--resume', sessionKey, // Pass session key to --resume!
+            '--output-format', 'stream-json', // JSONL output from Claude
+            '--input-format', 'stream-json', // JSONL input to Claude
+            '--verbose', // Complete messages
+        ];
+        console.log(`[Claude Process] Spawning: claude ${args.join(' ')}`);
+        const proc = (0, child_process_1.spawn)('claude', args, {
             cwd: resolvedDir,
             env: { ...process.env, TERM: 'xterm-256color' },
             shell: true,
@@ -78,12 +92,23 @@ class ClaudeProcessManager extends events_1.EventEmitter {
         return { cwd: resolvedDir };
     }
     /**
-     * Send input to a Claude process
+     * Send input to a Claude process in JSONL format
+     * Format: {"type":"user","message":{"role":"user","content":"..."}}
      */
     sendInput(terminalSessionId, input) {
         const info = this.processes.get(terminalSessionId);
         if (info?.process?.stdin) {
-            info.process.stdin.write(input);
+            // Format as JSONL user message (SDK format from happy-reference)
+            const message = {
+                type: 'user',
+                message: {
+                    role: 'user',
+                    content: input.replace(/\n$/, ''), // Remove trailing newline from input
+                },
+            };
+            const jsonLine = JSON.stringify(message) + '\n';
+            console.log(`[Claude Process] Sending JSONL: ${jsonLine.substring(0, 100)}...`);
+            info.process.stdin.write(jsonLine);
         }
     }
     /**
@@ -96,7 +121,31 @@ class ClaudeProcessManager extends events_1.EventEmitter {
      * Set up event handlers for the spawned process
      */
     setupProcessHandlers(terminalSessionId, proc, directory, sessionKey) {
+        // Buffer for incomplete JSONL lines
+        let outputBuffer = '';
         proc.stdout?.on('data', (data) => {
+            outputBuffer += data.toString();
+            // Process complete JSONL lines
+            const lines = outputBuffer.split('\n');
+            outputBuffer = lines.pop() || ''; // Keep incomplete line in buffer
+            for (const line of lines) {
+                if (line.trim()) {
+                    try {
+                        const message = JSON.parse(line);
+                        // Emit parsed SDK message for status tracking
+                        this.emit('sdk_message', { terminalSessionId, message });
+                        // Log SDK message type for debugging
+                        if (message.type) {
+                            console.log(`[Claude Process] SDK message: ${message.type}${message.subtype ? '/' + message.subtype : ''}`);
+                        }
+                    }
+                    catch (e) {
+                        // Non-JSON output (shouldn't happen with SDK flags, but log it)
+                        console.log(`[Claude Process] Non-JSON stdout: ${line.substring(0, 50)}...`);
+                    }
+                }
+            }
+            // Keep raw output emission for terminal display
             const output = {
                 terminalSessionId,
                 output: data.toString(),

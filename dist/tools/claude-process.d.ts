@@ -18,7 +18,8 @@ declare class ClaudeProcessManager extends EventEmitter {
         cwd: string;
     }>;
     /**
-     * Send input to a Claude process
+     * Send input to a Claude process in JSONL format
+     * Format: {"type":"user","message":{"role":"user","content":"..."}}
      */
     sendInput(terminalSessionId: string, input: string): void;
     /**
