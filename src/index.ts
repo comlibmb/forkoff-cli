@@ -454,6 +454,7 @@ async function startConnection(): Promise<void> {
           const sessionTime = new Date(session.lastUsedAt).getTime();
           if (now - sessionTime < 60000) {
             session.state = 'active';
+            session.lastUsedAt = new Date().toISOString(); // Update to NOW for active sessions
             hasActiveSession = true;
           }
         }
@@ -588,6 +589,23 @@ async function startConnection(): Promise<void> {
       transcriptStreamer.unsubscribeFromUpdates(data.sessionKey);
     });
 
+    // Handle SDK subscribe start - mobile wants live updates for a session
+    // This is sent by API when mobile uses transcript_subscribe_sdk
+    wsClient.on('transcript_subscribe_sdk_start', async (data: any) => {
+      console.log(chalk.cyan(`[Transcript] SDK subscribe start: ${data.sessionKey}`));
+
+      // Find the transcript file for this session
+      const sessions = claudeSessionDetector.scanSessions();
+      const session = sessions.find(s => s.sessionKey === data.sessionKey);
+
+      if (session?.transcriptPath) {
+        console.log(chalk.dim(`[Transcript] Starting watch for: ${session.transcriptPath}`));
+        transcriptStreamer.subscribeToUpdates(data.sessionKey, session.transcriptPath);
+      } else {
+        console.log(chalk.yellow(`[Transcript] No transcript found for session: ${data.sessionKey}`));
+      }
+    });
+
     // Handle claude sessions request - mobile app wants current sessions
     wsClient.on('claude_sessions_request', () => {
       console.log(chalk.cyan(`[Claude] Sessions requested by mobile`));
@@ -601,6 +619,7 @@ async function startConnection(): Promise<void> {
           const sessionTime = new Date(session.lastUsedAt).getTime();
           if (now - sessionTime < 60000) {
             session.state = 'active';
+            session.lastUsedAt = new Date().toISOString(); // Update to NOW for active sessions
             hasActiveSession = true;
           }
         }
@@ -615,10 +634,121 @@ async function startConnection(): Promise<void> {
       }
     });
 
+    // Handle RPC requests from the API gateway
+    wsClient.on('rpc_request', async (data: { requestId: string; method: string; params: any }) => {
+      console.log(chalk.cyan(`[RPC] Request: ${data.method}, requestId: ${data.requestId}`));
+
+      try {
+        if (data.method === 'get_session_history') {
+          const { claudeSessionId, sessionKey, limit = 400, offset = 0 } = data.params;
+          console.log(chalk.dim(`[RPC] get_session_history: claudeSessionId=${claudeSessionId}, sessionKey=${sessionKey}`));
+
+          // Find the transcript file
+          let transcriptPath: string | undefined;
+
+          // If claudeSessionId is provided, search for the JSONL file directly
+          if (claudeSessionId) {
+            const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
+            if (fs.existsSync(claudeProjectsDir)) {
+              const projectDirs = fs.readdirSync(claudeProjectsDir);
+              for (const projectDir of projectDirs) {
+                const potentialPath = path.join(claudeProjectsDir, projectDir, `${claudeSessionId}.jsonl`);
+                if (fs.existsSync(potentialPath)) {
+                  transcriptPath = potentialPath;
+                  console.log(chalk.dim(`[RPC] Found JSONL by claudeSessionId: ${transcriptPath}`));
+                  break;
+                }
+              }
+            }
+          }
+
+          // If not found by claudeSessionId, search all sessions
+          if (!transcriptPath && claudeSessionDetector.isClaudeInstalled()) {
+            const sessions = claudeSessionDetector.scanSessions();
+
+            // First try to match by sessionKey
+            let session = sessions.find(s => s.sessionKey === sessionKey);
+
+            // If no match by sessionKey, try to find most recent session for the same directory
+            if (!session && sessions.length > 0) {
+              // Just use the most recent session as fallback
+              session = sessions[0];
+              console.log(chalk.dim(`[RPC] Using most recent session as fallback: ${session.sessionKey}`));
+            }
+
+            if (session?.transcriptPath) {
+              transcriptPath = session.transcriptPath;
+              console.log(chalk.dim(`[RPC] Found transcript path: ${transcriptPath}`));
+            }
+          }
+
+          if (!transcriptPath || !fs.existsSync(transcriptPath)) {
+            console.log(chalk.yellow(`[RPC] No transcript file found for session`));
+            wsClient.sendRpcResponse({
+              requestId: data.requestId,
+              result: { entries: [], totalEntries: 0, hasMore: false }
+            });
+            return;
+          }
+
+          // Read the transcript file
+          const result = await transcriptStreamer.fetchHistory(transcriptPath, offset, limit, true);
+          console.log(chalk.green(`[RPC] Loaded ${result.entries.length} entries from transcript`));
+
+          // IMPORTANT: Start watching this transcript for live updates
+          // This is needed because SDK mode doesn't send transcript_subscribe
+          // Use sessionKey from mobile for updates (must match what mobile is listening for)
+          const updateSessionKey = sessionKey;
+          if (!updateSessionKey) {
+            console.log(chalk.yellow(`[RPC] No sessionKey provided, using claudeSessionId - updates may not route correctly`));
+          }
+          const watchKey = updateSessionKey || claudeSessionId || data.requestId;
+          console.log(chalk.cyan(`[RPC] Starting file watch for live updates: ${watchKey}`));
+          transcriptStreamer.subscribeToUpdates(watchKey, transcriptPath);
+
+          wsClient.sendRpcResponse({
+            requestId: data.requestId,
+            result: {
+              entries: result.entries,
+              totalEntries: result.totalEntries,
+              hasMore: result.hasMore,
+              sessionKey: watchKey, // Tell mobile which sessionKey to listen for updates
+            }
+          });
+        } else {
+          console.log(chalk.yellow(`[RPC] Unknown method: ${data.method}`));
+          wsClient.sendRpcResponse({
+            requestId: data.requestId,
+            error: { code: -32601, message: `Method not found: ${data.method}` }
+          });
+        }
+      } catch (error: any) {
+        console.error(chalk.red(`[RPC] Error handling ${data.method}:`, error.message));
+        wsClient.sendRpcResponse({
+          requestId: data.requestId,
+          error: { code: -32603, message: error.message || 'Internal error' }
+        });
+      }
+    });
+
     // Forward live transcript updates to WebSocket
     transcriptStreamer.on('update', (data: any) => {
       console.log(chalk.green(`[Transcript] Sending update for ${data.sessionKey}: ${data.entry?.type}`));
       wsClient.sendTranscriptUpdate(data);
+
+      // Also update session lastUsedAt to keep it fresh
+      // Find the session to get the directory
+      const sessions = claudeSessionDetector.getSessions();
+      const session = sessions.find(s => s.sessionKey === data.sessionKey);
+      if (session) {
+        wsClient.sendClaudeSessionUpdate({
+          sessionKey: data.sessionKey,
+          directory: session.directory,
+          state: 'active',
+          lastUsedAt: new Date().toISOString(),
+          transcriptPath: session.transcriptPath,
+        });
+      }
     });
 
     // Forward Claude process output to WebSocket

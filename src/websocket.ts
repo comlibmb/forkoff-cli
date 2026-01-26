@@ -1,6 +1,7 @@
 import { io, Socket } from 'socket.io-client';
 import { config } from './config';
 import { EventEmitter } from 'events';
+import { v4 as uuidv4 } from 'uuid';
 
 type DeviceStatus = 'online' | 'offline' | 'busy' | 'syncing';
 
@@ -84,6 +85,15 @@ class WebSocketClient extends EventEmitter {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 10;
   private heartbeatInterval: NodeJS.Timeout | null = null;
+  private _sessionId: string = '';
+
+  // Unique session ID for this CLI connection
+  get sessionId(): string {
+    if (!this._sessionId) {
+      this._sessionId = uuidv4();
+    }
+    return this._sessionId;
+  }
 
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -98,9 +108,16 @@ class WebSocketClient extends EventEmitter {
         return;
       }
 
+      // Generate unique session ID for this CLI connection
+      const sessionId = this.sessionId;
+      const userId = config.userId; // Pass userId from config for user-based routing
+
       this.socket = io(config.wsUrl, {
         auth: {
           deviceId,
+          userId, // Include userId so API can track by user even if device not in DB
+          clientType: 'session-scoped',
+          sessionId,
         },
         transports: ['websocket'],
         reconnection: true,
@@ -111,7 +128,7 @@ class WebSocketClient extends EventEmitter {
 
       this.socket.on('connect', () => {
         this.reconnectAttempts = 0;
-        console.log(`[WS] Connected with deviceId: ${deviceId}`);
+        console.log(`[WS] Connected with deviceId: ${deviceId}, sessionId: ${sessionId}`);
         this.emit('connected');
         this.startHeartbeat();
         resolve();
@@ -187,10 +204,23 @@ class WebSocketClient extends EventEmitter {
         this.emit('transcript_unsubscribe', data);
       });
 
+      // Listen for SDK subscribe start requests from API
+      // This is sent when mobile uses transcript_subscribe_sdk
+      this.socket.on('transcript_subscribe_sdk_start', (data: { sessionKey: string; requestedBy: string }) => {
+        console.log(`[WS] Received transcript_subscribe_sdk_start:`, JSON.stringify(data));
+        this.emit('transcript_subscribe_sdk_start', data);
+      });
+
       // Listen for claude sessions request (mobile wants current state)
       this.socket.on('claude_sessions_request', (data: { requestedBy: string }) => {
         console.log(`[WS] Received claude_sessions_request`);
         this.emit('claude_sessions_request', data);
+      });
+
+      // Listen for RPC requests from the API gateway
+      this.socket.on('rpc_request', (data: { requestId: string; method: string; params: any }) => {
+        console.log(`[WS] Received rpc_request: ${data.method}, requestId: ${data.requestId}`);
+        this.emit('rpc_request', data);
       });
     });
   }
@@ -313,6 +343,16 @@ class WebSocketClient extends EventEmitter {
     entry: TranscriptEntry;
   }): void {
     this.socket?.emit('transcript_update', data);
+  }
+
+  // Send RPC response back to API gateway
+  sendRpcResponse(data: {
+    requestId: string;
+    result?: any;
+    error?: { code: number; message: string };
+  }): void {
+    console.log(`[WS] Sending rpc_response: ${data.requestId}, hasResult: ${!!data.result}, hasError: ${!!data.error}`);
+    this.socket?.emit('rpc_response', data);
   }
 
   get isConnected(): boolean {
