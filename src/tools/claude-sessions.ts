@@ -248,13 +248,13 @@ class ClaudeSessionDetector extends EventEmitter {
       if (!existing) {
         // New session detected
         this.emit('session_detected', session);
-      } else if (
-        existing.state !== session.state ||
-        existing.lastUsedAt !== session.lastUsedAt
-      ) {
-        // Session changed
+      } else if (existing.state !== session.state) {
+        // Only emit change when state actually changes (active <-> inactive)
+        // Don't emit for file modifications on already-active sessions
         this.emit('session_changed', session);
       }
+      // Note: Don't emit session_changed just because lastUsedAt changed
+      // This was causing excessive updates and slowing down the mobile app
     }
 
     // Check for removed sessions
