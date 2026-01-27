@@ -38,6 +38,7 @@ class TranscriptStreamer extends EventEmitter {
   private watchers: Map<string, chokidar.FSWatcher> = new Map();
   private fileSizes: Map<string, number> = new Map();
   private lastLineNumbers: Map<string, number> = new Map();
+  private processingLock: Map<string, boolean> = new Map(); // Prevent concurrent reads
 
   /**
    * Fetch transcript history from a JSONL file
@@ -144,26 +145,40 @@ class TranscriptStreamer extends EventEmitter {
 
     watcher.on('change', async () => {
       try {
+        // Prevent concurrent processing for the same session
+        if (this.processingLock.get(sessionKey)) {
+          console.log(`[Transcript] Skipping change event - already processing: ${sessionKey}`);
+          return;
+        }
+
         const newStats = fs.statSync(transcriptPath);
         console.log(`[Transcript] File changed: ${sessionKey}, size: ${newStats.size}`);
         const oldSize = this.fileSizes.get(sessionKey) || 0;
 
         // Only process if file grew
         if (newStats.size > oldSize) {
+          // Acquire lock
+          this.processingLock.set(sessionKey, true);
           this.fileSizes.set(sessionKey, newStats.size);
 
-          // Read new lines from the file
-          const newEntries = await this.readNewLines(transcriptPath, sessionKey);
+          try {
+            // Read new lines from the file
+            const newEntries = await this.readNewLines(transcriptPath, sessionKey);
 
-          for (const entry of newEntries) {
-            this.emit('update', {
-              sessionKey,
-              entry,
-            });
+            for (const entry of newEntries) {
+              this.emit('update', {
+                sessionKey,
+                entry,
+              });
+            }
+          } finally {
+            // Release lock
+            this.processingLock.set(sessionKey, false);
           }
         }
       } catch (error) {
         // File might be temporarily unavailable
+        this.processingLock.set(sessionKey, false);
       }
     });
 
@@ -179,6 +194,7 @@ class TranscriptStreamer extends EventEmitter {
       watcher.close();
       this.watchers.delete(sessionKey);
       this.fileSizes.delete(sessionKey);
+      this.processingLock.delete(sessionKey);
     }
   }
 
@@ -477,6 +493,7 @@ class TranscriptStreamer extends EventEmitter {
     }
     this.fileSizes.clear();
     this.lastLineNumbers.clear();
+    this.processingLock.clear();
   }
 }
 
