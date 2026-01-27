@@ -756,6 +756,43 @@ async function startConnection(): Promise<void> {
       wsClient.sendTerminalOutput(data);
     });
 
+    // Forward Claude approval requests to WebSocket (mobile approval)
+    claudeProcessManager.on('claude_approval_request', (data: any) => {
+      console.log(chalk.yellow(`[Claude] Approval request: ${data.approvalId}`));
+      wsClient.sendClaudeApprovalRequest(data);
+    });
+
+    // Handle Claude approval responses from mobile
+    wsClient.on('claude_approval_response', (data: any) => {
+      console.log(chalk.green(`[Claude] Approval response: ${data.approvalId} -> ${data.response}`));
+      claudeProcessManager.handleApprovalResponse(data.approvalId, data.response);
+    });
+
+    // Handle user messages from mobile app (send to active Claude session)
+    wsClient.on('user_message', async (data: any) => {
+      console.log(chalk.cyan(`[Claude] User message: ${data.message.substring(0, 50)}${data.message.length > 50 ? '...' : ''}`));
+
+      // Find the active Claude session to send the message to
+      const activeSessions = claudeProcessManager.getActiveSessions();
+
+      if (activeSessions.length === 0) {
+        console.log(chalk.yellow(`[Claude] No active Claude session to send message to`));
+        return;
+      }
+
+      // If sessionKey is provided, try to find matching session
+      let targetSession = activeSessions[0]; // Default to first active session
+      if (data.sessionKey) {
+        const matchingSession = activeSessions.find(s => s.sessionKey === data.sessionKey);
+        if (matchingSession) {
+          targetSession = matchingSession;
+        }
+      }
+
+      console.log(chalk.dim(`[Claude] Sending to session: ${targetSession.terminalSessionId}`));
+      claudeProcessManager.sendInput(targetSession.terminalSessionId, data.message + '\n');
+    });
+
     // Handle Claude process end
     claudeProcessManager.on('session_ended', (data: any) => {
       console.log(chalk.dim(`[Claude] Session ended: ${data.terminalSessionId}`));

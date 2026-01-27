@@ -31,6 +31,16 @@ interface ClaudeResumeRequest {
   requestedBy: string;
 }
 
+interface UserMessageRequest {
+  deviceId: string;
+  message: string;
+  sessionKey?: string;
+  mode?: {
+    permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
+    model?: string;
+  };
+}
+
 interface ClaudeStartRequest {
   directory: string;
   terminalSessionId: string;
@@ -78,6 +88,23 @@ interface TranscriptEntry {
     toolInput?: any;
     isError?: boolean;
   };
+}
+
+// Claude approval request for mobile approval
+interface ClaudeApprovalRequest {
+  approvalId: string;
+  terminalSessionId: string;
+  sessionKey?: string;
+  context: string[];       // Recent output lines for context
+  options: string[];       // Available options (e.g., ['y:yes', 'n:no', 'p:plan'])
+  promptText: string;      // The actual prompt text
+}
+
+// Claude approval response from mobile
+interface ClaudeApprovalResponse {
+  approvalId: string;
+  response: string;        // The response character ('y', 'n', 'p', etc.)
+  respondedBy: string;
 }
 
 class WebSocketClient extends EventEmitter {
@@ -170,6 +197,12 @@ class WebSocketClient extends EventEmitter {
         this.emit('git_clone', data);
       });
 
+      // Listen for user messages from mobile app
+      this.socket.on('user_message', (data: UserMessageRequest) => {
+        console.log(`[WS] Received user_message: ${data.message.substring(0, 50)}...`);
+        this.emit('user_message', data);
+      });
+
       // Listen for Claude session requests from mobile app
       this.socket.on('claude_resume_session', (data: ClaudeResumeRequest) => {
         console.log(`[WS] Received claude_resume_session:`, JSON.stringify(data));
@@ -221,6 +254,12 @@ class WebSocketClient extends EventEmitter {
       this.socket.on('rpc_request', (data: { requestId: string; method: string; params: any }) => {
         console.log(`[WS] Received rpc_request: ${data.method}, requestId: ${data.requestId}`);
         this.emit('rpc_request', data);
+      });
+
+      // Listen for Claude approval responses from mobile
+      this.socket.on('claude_approval_response', (data: ClaudeApprovalResponse) => {
+        console.log(`[WS] Received claude_approval_response: ${data.approvalId}, response: ${data.response}`);
+        this.emit('claude_approval_response', data);
       });
     });
   }
@@ -353,6 +392,12 @@ class WebSocketClient extends EventEmitter {
   }): void {
     console.log(`[WS] Sending rpc_response: ${data.requestId}, hasResult: ${!!data.result}, hasError: ${!!data.error}`);
     this.socket?.emit('rpc_response', data);
+  }
+
+  // Send Claude approval request to mobile
+  sendClaudeApprovalRequest(data: ClaudeApprovalRequest): void {
+    console.log(`[WS] Sending claude_approval_request: ${data.approvalId}`);
+    this.socket?.emit('claude_approval_request', data);
   }
 
   get isConnected(): boolean {
