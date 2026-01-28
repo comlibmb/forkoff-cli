@@ -400,6 +400,47 @@ class WebSocketClient extends EventEmitter {
     this.socket?.emit('claude_approval_request', data);
   }
 
+  // Send thinking content to mobile
+  sendThinkingContent(data: {
+    sessionKey?: string;
+    thinkingId: string;
+    content: string;
+    partial: boolean;
+  }): void {
+    this.socket?.emit('thinking_content', data);
+  }
+
+  // Send token usage to mobile
+  sendTokenUsage(data: {
+    sessionKey?: string;
+    usage: {
+      inputTokens: number;
+      outputTokens: number;
+    };
+  }): void {
+    this.socket?.emit('token_usage', data);
+  }
+
+  // Send task progress to mobile
+  sendTaskProgress(data: {
+    sessionKey?: string;
+    type: 'created' | 'updated' | 'completed' | 'list';
+    task?: {
+      id: string;
+      subject: string;
+      status: 'pending' | 'in_progress' | 'completed';
+      activeForm?: string;
+    };
+    tasks?: Array<{
+      id: string;
+      subject: string;
+      status: 'pending' | 'in_progress' | 'completed';
+      activeForm?: string;
+    }>;
+  }): void {
+    this.socket?.emit('task_progress', data);
+  }
+
   get isConnected(): boolean {
     return this.socket?.connected ?? false;
   }

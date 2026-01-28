@@ -139,6 +139,42 @@ interface SdkMessage {
   [key: string]: unknown;
 }
 
+/** Thinking content event payload */
+interface ThinkingContentEvent {
+  terminalSessionId: string;
+  sessionKey?: string;
+  thinkingId: string;
+  content: string;
+  partial: boolean;
+}
+
+/** Token usage event payload */
+interface TokenUsageEvent {
+  terminalSessionId: string;
+  sessionKey?: string;
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+  };
+}
+
+/** Task structure for task progress tracking */
+interface TaskInfo {
+  id: string;
+  subject: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  activeForm?: string;
+}
+
+/** Task progress event payload */
+interface TaskProgressEvent {
+  terminalSessionId: string;
+  sessionKey?: string;
+  type: 'created' | 'updated' | 'completed' | 'list';
+  task?: TaskInfo;
+  tasks?: TaskInfo[];
+}
+
 /** Event payload for SDK messages */
 interface SdkMessageEvent {
   terminalSessionId: string;
@@ -151,6 +187,9 @@ interface ClaudeProcessManagerEvents {
   session_ended: [event: SessionEndedEvent];
   sdk_message: [event: SdkMessageEvent];
   claude_approval_request: [request: ClaudeApprovalRequest];
+  thinking_content: [event: ThinkingContentEvent];
+  token_usage: [event: TokenUsageEvent];
+  task_progress: [event: TaskProgressEvent];
 }
 
 class ClaudeProcessManager extends EventEmitter {
@@ -336,6 +375,15 @@ class ClaudeProcessManager extends EventEmitter {
             if (processInfo) {
               this.checkForToolUseInSdkMessage(terminalSessionId, message, processInfo);
             }
+
+            // Parse thinking content from content_block_delta with thinking type
+            this.parseThinkingContent(terminalSessionId, message, sessionKey);
+
+            // Parse token usage from message_delta
+            this.parseTokenUsage(terminalSessionId, message, sessionKey);
+
+            // Parse task progress from TaskCreate/TaskUpdate/TaskList tool_use
+            this.parseTaskProgress(terminalSessionId, message, sessionKey);
           } catch (e) {
             // Non-JSON output (shouldn't happen with SDK flags, but log it)
             console.log(`[Claude Process] Non-JSON stdout: ${line.substring(0, 50)}...`);
@@ -749,6 +797,206 @@ class ClaudeProcessManager extends EventEmitter {
       }
     }
     return undefined;
+  }
+
+  /**
+   * Parse thinking content from SDK messages.
+   * Claude SDK emits content_block_delta with type 'thinking' for extended thinking.
+   */
+  private parseThinkingContent(
+    terminalSessionId: string,
+    message: any,
+    sessionKey?: string
+  ): void {
+    // Check for content_block_delta with thinking type
+    if (message.type === 'content_block_delta' && message.delta?.type === 'thinking_delta') {
+      const thinkingId = message.index?.toString() || `thinking-${Date.now()}`;
+      const content = message.delta?.thinking || '';
+
+      this.emit('thinking_content', {
+        terminalSessionId,
+        sessionKey,
+        thinkingId,
+        content,
+        partial: true,
+      });
+      return;
+    }
+
+    // Check for content_block_stop to mark thinking complete
+    if (message.type === 'content_block_stop') {
+      const processInfo = this.processes.get(terminalSessionId);
+      // Check if this was a thinking block by looking at recent messages
+      // The SDK sends content_block_start before deltas, so we track by index
+      const thinkingId = message.index?.toString() || '';
+      if (thinkingId) {
+        this.emit('thinking_content', {
+          terminalSessionId,
+          sessionKey,
+          thinkingId,
+          content: '',
+          partial: false,
+        });
+      }
+    }
+
+    // Also check for thinking in assistant message content array
+    if (message.type === 'assistant' && message.message?.content) {
+      const content = Array.isArray(message.message.content)
+        ? message.message.content
+        : [message.message.content];
+
+      for (const block of content) {
+        if (block.type === 'thinking' && block.thinking) {
+          this.emit('thinking_content', {
+            terminalSessionId,
+            sessionKey,
+            thinkingId: `msg-${message.message?.id || Date.now()}`,
+            content: block.thinking,
+            partial: false,
+          });
+        }
+      }
+    }
+  }
+
+  /**
+   * Parse token usage from SDK messages.
+   * Claude SDK emits message_delta with usage field containing token counts.
+   */
+  private parseTokenUsage(
+    terminalSessionId: string,
+    message: any,
+    sessionKey?: string
+  ): void {
+    // Check for message_delta with usage
+    if (message.type === 'message_delta' && message.usage) {
+      const usage = message.usage;
+      if (usage.input_tokens !== undefined || usage.output_tokens !== undefined) {
+        this.emit('token_usage', {
+          terminalSessionId,
+          sessionKey,
+          usage: {
+            inputTokens: usage.input_tokens || 0,
+            outputTokens: usage.output_tokens || 0,
+          },
+        });
+      }
+      return;
+    }
+
+    // Also check for usage in result messages (end of conversation turn)
+    if (message.type === 'result' && message.usage) {
+      const usage = message.usage;
+      this.emit('token_usage', {
+        terminalSessionId,
+        sessionKey,
+        usage: {
+          inputTokens: usage.input_tokens || 0,
+          outputTokens: usage.output_tokens || 0,
+        },
+      });
+    }
+  }
+
+  /**
+   * Parse task progress from SDK messages.
+   * Detects TaskCreate, TaskUpdate, TaskList tool uses and extracts task data.
+   */
+  private parseTaskProgress(
+    terminalSessionId: string,
+    message: any,
+    sessionKey?: string
+  ): void {
+    // Only process assistant messages with tool_use
+    if (message.type !== 'assistant') return;
+
+    const content = message.message?.content;
+    if (!content) return;
+
+    const contentArray = Array.isArray(content) ? content : [content];
+
+    for (const block of contentArray) {
+      if (block.type !== 'tool_use') continue;
+
+      const toolName = block.name?.toLowerCase();
+      if (!toolName) continue;
+
+      // Handle TaskCreate
+      if (toolName === 'taskcreate') {
+        const input = block.input || {};
+        const task: TaskInfo = {
+          id: block.id || `task-${Date.now()}`,
+          subject: input.subject || 'New Task',
+          status: 'pending',
+          activeForm: input.activeForm,
+        };
+
+        console.log(`[Claude Process] Task created: ${task.subject}`);
+        this.emit('task_progress', {
+          terminalSessionId,
+          sessionKey,
+          type: 'created',
+          task,
+        });
+      }
+
+      // Handle TaskUpdate
+      if (toolName === 'taskupdate') {
+        const input = block.input || {};
+        const task: TaskInfo = {
+          id: input.taskId || block.id || '',
+          subject: input.subject || '',
+          status: input.status || 'pending',
+          activeForm: input.activeForm,
+        };
+
+        const eventType = task.status === 'completed' ? 'completed' : 'updated';
+        console.log(`[Claude Process] Task ${eventType}: ${task.id} -> ${task.status}`);
+        this.emit('task_progress', {
+          terminalSessionId,
+          sessionKey,
+          type: eventType,
+          task,
+        });
+      }
+
+      // Handle TaskList (tool result contains the list)
+      if (toolName === 'tasklist') {
+        console.log(`[Claude Process] Task list requested`);
+        // TaskList doesn't have task data in tool_use, only in tool_result
+        // We'll emit a list event when we see the result
+      }
+    }
+
+    // Also check for tool_result from TaskList
+    if (message.type === 'tool_result') {
+      const toolName = message.tool_name?.toLowerCase();
+      if (toolName === 'tasklist' && message.content) {
+        try {
+          // TaskList result might be JSON array of tasks
+          const tasks = typeof message.content === 'string'
+            ? JSON.parse(message.content)
+            : message.content;
+
+          if (Array.isArray(tasks)) {
+            this.emit('task_progress', {
+              terminalSessionId,
+              sessionKey,
+              type: 'list',
+              tasks: tasks.map((t: any) => ({
+                id: t.id || '',
+                subject: t.subject || '',
+                status: t.status || 'pending',
+                activeForm: t.activeForm,
+              })),
+            });
+          }
+        } catch (e) {
+          // Not JSON, ignore
+        }
+      }
+    }
   }
 }
 
