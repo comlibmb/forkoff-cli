@@ -807,6 +807,43 @@ async function startConnection(): Promise<void> {
       }
     });
 
+    // Forward thinking content to mobile
+    claudeProcessManager.on('thinking_content', (data: any) => {
+      if (data.content || !data.partial) {
+        console.log(chalk.magenta(`[Claude] Thinking${data.partial ? ' (streaming)' : ' (complete)'}: ${data.content?.substring(0, 50) || '...'}`));
+      }
+      wsClient.sendThinkingContent({
+        sessionKey: data.sessionKey,
+        thinkingId: data.thinkingId,
+        content: data.content,
+        partial: data.partial,
+      });
+    });
+
+    // Forward token usage to mobile
+    claudeProcessManager.on('token_usage', (data: any) => {
+      console.log(chalk.blue(`[Claude] Tokens: ${data.usage.inputTokens} in / ${data.usage.outputTokens} out`));
+      wsClient.sendTokenUsage({
+        sessionKey: data.sessionKey,
+        usage: data.usage,
+      });
+    });
+
+    // Forward task progress to mobile
+    claudeProcessManager.on('task_progress', (data: any) => {
+      if (data.type === 'list') {
+        console.log(chalk.cyan(`[Claude] Task list: ${data.tasks?.length || 0} tasks`));
+      } else {
+        console.log(chalk.cyan(`[Claude] Task ${data.type}: ${data.task?.subject || data.task?.id}`));
+      }
+      wsClient.sendTaskProgress({
+        sessionKey: data.sessionKey,
+        type: data.type,
+        task: data.task,
+        tasks: data.tasks,
+      });
+    });
+
     wsClient.on('disconnected', (reason) => {
       console.log(chalk.yellow(`\nDisconnected: ${reason}`));
       if (reason !== 'io client disconnect') {
