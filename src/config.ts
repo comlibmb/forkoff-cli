@@ -4,6 +4,46 @@ import * as os from 'os';
 import { machineIdSync } from 'node-machine-id';
 import { v4 as uuidv4 } from 'uuid';
 
+// SECURITY: Helper to check if URL is local (allows insecure connections for local dev)
+function isLocalUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    return host === 'localhost' ||
+           host === '127.0.0.1' ||
+           host.startsWith('192.168.') ||
+           host.startsWith('10.') ||
+           host.startsWith('172.16.') ||
+           host.startsWith('172.17.') ||
+           host.startsWith('172.18.') ||
+           host.startsWith('172.19.') ||
+           host.startsWith('172.2') ||
+           host.startsWith('172.30.') ||
+           host.startsWith('172.31.');
+  } catch {
+    return false;
+  }
+}
+
+// SECURITY: Enforce secure protocol for non-local URLs
+function enforceSecureUrl(url: string, type: 'api' | 'ws'): string {
+  if (isLocalUrl(url)) {
+    return url; // Allow insecure for local development
+  }
+
+  // For non-local URLs, enforce HTTPS/WSS
+  if (type === 'api' && url.startsWith('http://')) {
+    console.warn('[Config] SECURITY: Upgrading insecure API URL to HTTPS');
+    return url.replace('http://', 'https://');
+  }
+  if (type === 'ws' && url.startsWith('ws://')) {
+    console.warn('[Config] SECURITY: Upgrading insecure WebSocket URL to WSS');
+    return url.replace('ws://', 'wss://');
+  }
+
+  return url;
+}
+
 interface DeviceConfig {
   deviceId: string | null;
   deviceName: string;
@@ -81,20 +121,24 @@ class Config {
   }
 
   get apiUrl(): string {
-    return this.data.apiUrl;
+    // SECURITY: Enforce HTTPS for non-local URLs
+    return enforceSecureUrl(this.data.apiUrl, 'api');
   }
 
   set apiUrl(value: string) {
-    this.data.apiUrl = value;
+    // SECURITY: Enforce HTTPS for non-local URLs when setting
+    this.data.apiUrl = enforceSecureUrl(value, 'api');
     this.save();
   }
 
   get wsUrl(): string {
-    return this.data.wsUrl;
+    // SECURITY: Enforce WSS for non-local URLs
+    return enforceSecureUrl(this.data.wsUrl, 'ws');
   }
 
   set wsUrl(value: string) {
-    this.data.wsUrl = value;
+    // SECURITY: Enforce WSS for non-local URLs when setting
+    this.data.wsUrl = enforceSecureUrl(value, 'ws');
     this.save();
   }
 

@@ -399,13 +399,15 @@ async function startConnection(): Promise<void> {
     wsClient.on('terminal_command', async (data) => {
       // Check if this is a Claude terminal session
       if (claudeProcessManager.isClaudeSession(data.terminalSessionId)) {
-        console.log(chalk.cyan(`[Claude] Input: ${data.command.substring(0, 50)}${data.command.length > 50 ? '...' : ''}`));
+        // SECURITY: Don't log command content - may contain sensitive data
+        console.log(chalk.cyan(`[Claude] Input received (${data.command.length} chars)`));
         claudeProcessManager.sendInput(data.terminalSessionId, data.command);
         return;
       }
 
       // Regular terminal command
-      console.log(chalk.blue(`[Terminal] Executing: ${data.command}`));
+      // SECURITY: Don't log command content - may contain passwords, API keys, etc.
+      console.log(chalk.blue(`[Terminal] Executing command (${data.command.length} chars)`));
       try {
         const result = await terminalManager.executeCommand(
           data.terminalSessionId,
@@ -531,11 +533,23 @@ async function startConnection(): Promise<void> {
 
     // Handle directory listing requests
     wsClient.on('directory_list', async (data: any) => {
-      console.log(chalk.dim(`[Dir] Listing: ${data.path}`));
+      console.log(chalk.dim(`[Dir] Listing request received`));
       try {
         let resolvedPath = data.path;
         if (resolvedPath === '~' || resolvedPath.startsWith('~/')) {
           resolvedPath = resolvedPath === '~' ? os.homedir() : resolvedPath.replace('~', os.homedir());
+        }
+
+        // SECURITY: Normalize and validate path to prevent traversal attacks
+        resolvedPath = path.resolve(resolvedPath);
+        const homeDir = os.homedir();
+
+        // SECURITY: Only allow access to directories under home directory
+        // This prevents accessing sensitive system files like /etc/passwd
+        if (!resolvedPath.startsWith(homeDir)) {
+          console.warn(chalk.yellow(`[Dir] Access denied - path outside home directory: ${resolvedPath}`));
+          wsClient.sendDirectoryListResponse({ requestId: data.requestId, entries: [], currentPath: data.path });
+          return;
         }
 
         const entries = fs.readdirSync(resolvedPath, { withFileTypes: true })
@@ -641,21 +655,42 @@ async function startConnection(): Promise<void> {
       try {
         if (data.method === 'get_session_history') {
           const { claudeSessionId, sessionKey, limit = 400, offset = 0 } = data.params;
-          console.log(chalk.dim(`[RPC] get_session_history: claudeSessionId=${claudeSessionId}, sessionKey=${sessionKey}`));
+          console.log(chalk.dim(`[RPC] get_session_history request received`));
 
           // Find the transcript file
           let transcriptPath: string | undefined;
 
           // If claudeSessionId is provided, search for the JSONL file directly
           if (claudeSessionId) {
+            // SECURITY: Validate claudeSessionId to prevent path traversal
+            // Session IDs should be alphanumeric with hyphens/underscores only
+            const sessionIdRegex = /^[a-zA-Z0-9_-]+$/;
+            if (!sessionIdRegex.test(claudeSessionId)) {
+              console.warn(chalk.yellow(`[RPC] Invalid claudeSessionId format - rejected`));
+              wsClient.sendRpcResponse({
+                requestId: data.requestId,
+                error: { code: -32602, message: 'Invalid session ID format' }
+              });
+              return;
+            }
+
             const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
             if (fs.existsSync(claudeProjectsDir)) {
               const projectDirs = fs.readdirSync(claudeProjectsDir);
               for (const projectDir of projectDirs) {
+                // SECURITY: Validate projectDir as well to prevent traversal
+                if (!sessionIdRegex.test(projectDir) && !/^[a-zA-Z0-9_.-]+$/.test(projectDir)) {
+                  continue;
+                }
                 const potentialPath = path.join(claudeProjectsDir, projectDir, `${claudeSessionId}.jsonl`);
+                // SECURITY: Verify the resolved path is still under claudeProjectsDir
+                const resolvedPotentialPath = path.resolve(potentialPath);
+                if (!resolvedPotentialPath.startsWith(claudeProjectsDir)) {
+                  continue;
+                }
                 if (fs.existsSync(potentialPath)) {
                   transcriptPath = potentialPath;
-                  console.log(chalk.dim(`[RPC] Found JSONL by claudeSessionId: ${transcriptPath}`));
+                  console.log(chalk.dim(`[RPC] Found JSONL transcript`));
                   break;
                 }
               }
@@ -770,7 +805,8 @@ async function startConnection(): Promise<void> {
 
     // Handle user messages from mobile app (send to active Claude session)
     wsClient.on('user_message', async (data: any) => {
-      console.log(chalk.cyan(`[Claude] User message: ${data.message.substring(0, 50)}${data.message.length > 50 ? '...' : ''}`));
+      // SECURITY: Don't log message content - may contain sensitive prompts
+      console.log(chalk.cyan(`[Claude] User message received (${data.message.length} chars)`));
 
       // Find the active Claude session to send the message to
       const activeSessions = claudeProcessManager.getActiveSessions();

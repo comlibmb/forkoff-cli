@@ -3,7 +3,8 @@
  * Spawns and manages Claude CLI processes for terminal sessions
  */
 
-import { spawn, ChildProcess } from 'child_process';
+import spawn from 'cross-spawn';
+import { ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
 import * as os from 'os';
 import * as path from 'path';
@@ -228,10 +229,10 @@ class ClaudeProcessManager extends EventEmitter {
       // '--permission-mode' removed - using default mode for tool execution
     ];
 
+    // SECURITY: Using cross-spawn instead of shell: true to prevent command injection
     const proc = spawn('claude', args, {
       cwd: resolvedDir,
       env: { ...process.env, TERM: 'xterm-256color' },
-      shell: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -261,10 +262,10 @@ class ClaudeProcessManager extends EventEmitter {
 
     console.log(`[Claude Process] Spawning: claude ${args.join(' ')}`);
 
+    // SECURITY: Using cross-spawn instead of shell: true to prevent command injection
     const proc = spawn('claude', args, {
       cwd: resolvedDir,
       env: { ...process.env, TERM: 'xterm-256color' },
-      shell: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -447,8 +448,14 @@ class ClaudeProcessManager extends EventEmitter {
 
   /**
    * Resolve path (handle ~ for home directory)
+   * SECURITY: Validates path doesn't contain dangerous characters
    */
   private resolvePath(dir: string): string {
+    // SECURITY: Reject paths with shell metacharacters that could be dangerous
+    if (/[;&|`$()<>]/.test(dir)) {
+      throw new Error('Invalid directory path: contains disallowed characters');
+    }
+
     if (dir === '~' || dir.startsWith('~/')) {
       return dir === '~' ? os.homedir() : dir.replace('~', os.homedir());
     }
