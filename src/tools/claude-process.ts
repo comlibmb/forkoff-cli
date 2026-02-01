@@ -15,6 +15,7 @@ interface ClaudeProcessInfo {
   directory: string;
   sessionKey?: string;
   outputBuffer: string[]; // Recent output lines for context
+  wasAutoRestarted?: boolean; // Track if this was an auto-restart
 }
 
 /**
@@ -193,11 +194,24 @@ interface ClaudeProcessManagerEvents {
   task_progress: [event: TaskProgressEvent];
 }
 
+/** Stores session info for auto-restart capability */
+interface SessionRestartInfo {
+  sessionKey?: string;
+  directory: string;
+  lastExitCode: number;
+  lastExitTime: number;
+  restartCount: number;
+}
+
 class ClaudeProcessManager extends EventEmitter {
   private processes: Map<string, ClaudeProcessInfo> = new Map();
   private pendingApprovals: Map<string, PendingApproval> = new Map();
   private readonly APPROVAL_TIMEOUT_MS: number = 5 * 60 * 1000; // 5 minutes
   private readonly MAX_OUTPUT_BUFFER_LINES: number = 20;
+  /** Track closed sessions for auto-restart */
+  private closedSessions: Map<string, SessionRestartInfo> = new Map();
+  /** Maximum number of auto-restarts per session to prevent chaos */
+  private readonly MAX_AUTO_RESTARTS: number = 3;
 
   /** Type-safe emit for known events */
   public override emit<K extends keyof ClaudeProcessManagerEvents>(
@@ -237,7 +251,7 @@ class ClaudeProcessManager extends EventEmitter {
     });
 
     this.setupProcessHandlers(terminalSessionId, proc, resolvedDir);
-    this.processes.set(terminalSessionId, { terminalSessionId, process: proc, directory: resolvedDir, outputBuffer: [] });
+    this.processes.set(terminalSessionId, { terminalSessionId, process: proc, directory: resolvedDir, outputBuffer: [], wasAutoRestarted: false });
 
     return { cwd: resolvedDir };
   }
@@ -270,7 +284,16 @@ class ClaudeProcessManager extends EventEmitter {
     });
 
     this.setupProcessHandlers(terminalSessionId, proc, resolvedDir, sessionKey);
-    this.processes.set(terminalSessionId, { terminalSessionId, process: proc, directory: resolvedDir, sessionKey, outputBuffer: [] });
+    this.processes.set(terminalSessionId, { terminalSessionId, process: proc, directory: resolvedDir, sessionKey, outputBuffer: [], wasAutoRestarted: false });
+
+    // Store session info for future message sends (needed since we spawn fresh process per message)
+    this.closedSessions.set(terminalSessionId, {
+      sessionKey,
+      directory: resolvedDir,
+      lastExitCode: 0,
+      lastExitTime: Date.now(),
+      restartCount: 0,
+    });
 
     return { cwd: resolvedDir };
   }
@@ -278,26 +301,40 @@ class ClaudeProcessManager extends EventEmitter {
   /**
    * Send input to a Claude process in JSONL format
    * Format: {"type":"user","message":{"role":"user","content":"..."}}
+   *
+   * IMPORTANT: Claude SDK with --resume and streaming JSON only supports ONE turn per process.
+   * So we kill any existing process and spawn a fresh one for each message.
+   * Since we use --resume, the conversation history is preserved.
    */
-  sendInput(terminalSessionId: string, input: string): void {
-    const info = this.processes.get(terminalSessionId);
-    if (!info?.process) {
-      console.log(`[Claude Process] No process found for ${terminalSessionId}`);
-      return;
+  async sendInput(terminalSessionId: string, input: string): Promise<boolean> {
+    let info = this.processes.get(terminalSessionId);
+    const restartInfo = this.closedSessions.get(terminalSessionId);
+
+    // If there's an existing process, kill it first (Claude SDK only supports 1 turn per process)
+    if (info?.process && info.process.exitCode === null) {
+      console.log(`[Claude Process] Killing existing process for new message (SDK limitation: 1 turn per process)`);
+      info.process.kill('SIGTERM');
+      // Wait for process to die
+      await new Promise(resolve => setTimeout(resolve, 200));
+      this.processes.delete(terminalSessionId);
+      info = undefined;
     }
 
-    // Check if process has exited
-    if (info.process.exitCode !== null) {
-      console.log(`[Claude Process] Process already exited for ${terminalSessionId} (exit code: ${info.process.exitCode})`);
-      return;
+    // Get session info from either current process or closed sessions
+    const sessionKey = info?.sessionKey || restartInfo?.sessionKey;
+    const directory = info?.directory || restartInfo?.directory;
+
+    if (!sessionKey || !directory) {
+      console.log(`[Claude Process] No session info found for ${terminalSessionId}`);
+      return false;
     }
 
-    if (!info.process.stdin || info.process.stdin.destroyed) {
-      console.log(`[Claude Process] stdin is closed or destroyed for ${terminalSessionId}`);
-      return;
-    }
+    // Spawn a fresh Claude process for this message
+    // IMPORTANT: We must write to stdin immediately after spawn - Claude CLI with
+    // stream-json input format exits if it doesn't receive input quickly
+    console.log(`[Claude Process] Spawning fresh process for message (--resume preserves history)`);
 
-    // Format as JSONL user message (SDK format from happy-reference)
+    // Format as JSONL user message (SDK format)
     const message = {
       type: 'user',
       message: {
@@ -306,24 +343,66 @@ class ClaudeProcessManager extends EventEmitter {
       },
     };
     const jsonLine = JSON.stringify(message) + '\n';
-    console.log(`[Claude Process] Sending JSONL: ${jsonLine.substring(0, 100)}...`);
 
     try {
-      info.process.stdin.write(jsonLine, (err) => {
-        if (err) {
-          console.error(`[Claude Process] Error writing to stdin for ${terminalSessionId}:`, err.message);
-        }
-      });
+      await this.resumeSession(sessionKey, directory, terminalSessionId);
+      info = this.processes.get(terminalSessionId);
     } catch (err) {
-      console.error(`[Claude Process] Exception writing to stdin for ${terminalSessionId}:`, (err as Error).message);
+      console.error(`[Claude Process] Failed to spawn process:`, (err as Error).message);
+      return false;
     }
+
+    if (!info?.process) {
+      console.log(`[Claude Process] Failed to get process after spawn for ${terminalSessionId}`);
+      return false;
+    }
+
+    if (!info.process.stdin || info.process.stdin.destroyed) {
+      console.log(`[Claude Process] stdin is closed or destroyed for ${terminalSessionId}`);
+      return false;
+    }
+
+    // Write message to stdin IMMEDIATELY - no waiting
+    console.log(`[Claude Process] Sending JSONL immediately: ${jsonLine.substring(0, 100)}...`);
+
+    return new Promise((resolve) => {
+      try {
+        info!.process.stdin!.write(jsonLine, (err) => {
+          if (err) {
+            console.error(`[Claude Process] Error writing to stdin for ${terminalSessionId}:`, err.message);
+            resolve(false);
+          } else {
+            console.log(`[Claude Process] Message written to stdin successfully`);
+            resolve(true);
+          }
+        });
+      } catch (err) {
+        console.error(`[Claude Process] Exception writing to stdin for ${terminalSessionId}:`, (err as Error).message);
+        resolve(false);
+      }
+    });
   }
 
   /**
-   * Check if a session is a Claude session
+   * Check if a session is a Claude session (active or restartable)
    */
   isClaudeSession(terminalSessionId: string): boolean {
-    return this.processes.has(terminalSessionId);
+    return this.processes.has(terminalSessionId) || this.closedSessions.has(terminalSessionId);
+  }
+
+  /**
+   * Register session info without spawning a process.
+   * Used when mobile opens a session view - we store the info so we can spawn later on first message.
+   */
+  registerSession(sessionKey: string, directory: string, terminalSessionId: string): void {
+    console.log(`[Claude Process] Registering session: ${sessionKey} in ${directory}`);
+    this.closedSessions.set(terminalSessionId, {
+      sessionKey,
+      directory,
+      lastExitCode: 0,
+      lastExitTime: Date.now(),
+      restartCount: 0,
+    });
   }
 
   /**
@@ -370,6 +449,14 @@ class ClaudeProcessManager extends EventEmitter {
             // Log SDK message type for debugging
             if (message.type) {
               console.log(`[Claude Process] SDK message: ${message.type}${message.subtype ? '/' + message.subtype : ''}`);
+
+              // Log when we receive a result message (end of turn)
+              if (message.type === 'result') {
+                console.log(`[Claude Process] Received result message - turn complete. Subtype: ${message.subtype}, Cost: $${message.cost_usd || 'unknown'}`);
+                if (message.is_error) {
+                  console.log(`[Claude Process] Result indicates error: ${JSON.stringify(message.error || 'unknown')}`);
+                }
+              }
             }
 
             // Detect tool_use in SDK messages and emit approval request
@@ -412,6 +499,26 @@ class ClaudeProcessManager extends EventEmitter {
 
     proc.on('close', (code: number | null) => {
       const exitCode = code ?? 0;
+      console.log(`[Claude Process] Process closed for ${terminalSessionId}, exit code: ${exitCode}`);
+
+      // Store session info for potential restart
+      // Get process info before we delete it
+      const processInfo = this.processes.get(terminalSessionId);
+      const existingInfo = this.closedSessions.get(terminalSessionId);
+
+      // Only preserve restart count if this was an auto-restarted session
+      // Otherwise reset to 0 (user explicitly started a new session)
+      const restartCount = processInfo?.wasAutoRestarted
+        ? (existingInfo?.restartCount ?? 0)
+        : 0;
+
+      this.closedSessions.set(terminalSessionId, {
+        sessionKey,
+        directory,
+        lastExitCode: exitCode,
+        lastExitTime: Date.now(),
+        restartCount,
+      });
 
       // Emit exit event
       const exitOutput: ProcessOutputEvent = {
@@ -488,6 +595,39 @@ class ClaudeProcessManager extends EventEmitter {
       sessionKey: info.sessionKey,
       directory: info.directory,
     }));
+  }
+
+  /**
+   * Clean up old closed session entries to prevent memory leaks.
+   * Sessions older than 1 hour are removed.
+   */
+  cleanupOldClosedSessions(): void {
+    const ONE_HOUR_MS = 60 * 60 * 1000;
+    const now = Date.now();
+    let cleanedCount = 0;
+
+    for (const [sessionId, info] of this.closedSessions.entries()) {
+      if (now - info.lastExitTime > ONE_HOUR_MS) {
+        this.closedSessions.delete(sessionId);
+        cleanedCount++;
+      }
+    }
+
+    if (cleanedCount > 0) {
+      console.log(`[Claude Process] Cleaned up ${cleanedCount} old closed session(s)`);
+    }
+  }
+
+  /**
+   * Clear restart counter for a session, allowing fresh restarts.
+   * Useful when user explicitly wants to reset.
+   */
+  clearRestartCounter(terminalSessionId: string): void {
+    const info = this.closedSessions.get(terminalSessionId);
+    if (info) {
+      info.restartCount = 0;
+      console.log(`[Claude Process] Restart counter cleared for ${terminalSessionId}`);
+    }
   }
 
   /**

@@ -401,7 +401,7 @@ async function startConnection(): Promise<void> {
       if (claudeProcessManager.isClaudeSession(data.terminalSessionId)) {
         // SECURITY: Don't log command content - may contain sensitive data
         console.log(chalk.cyan(`[Claude] Input received (${data.command.length} chars)`));
-        claudeProcessManager.sendInput(data.terminalSessionId, data.command);
+        await claudeProcessManager.sendInput(data.terminalSessionId, data.command);
         return;
       }
 
@@ -511,24 +511,32 @@ async function startConnection(): Promise<void> {
     });
 
     // Handle Claude resume session request from mobile
+    // NOTE: This is called when mobile opens a session view - we DON'T spawn Claude here
+    // Claude is only spawned when the user actually sends a message (via user_message event)
+    // This prevents duplicate transcript entries from double spawns
     wsClient.on('claude_resume_session', async (data: any) => {
       console.log(chalk.cyan(`[Claude] Resume session request: ${data.sessionKey} in ${data.directory}`));
-      try {
-        const result = await claudeProcessManager.resumeSession(data.sessionKey, data.directory, data.terminalSessionId);
 
-        wsClient.sendToolStatusUpdate('claude_code', 'active');
-        wsClient.sendClaudeSessionUpdate({
-          sessionKey: data.sessionKey,
-          directory: data.directory,
-          state: 'active',
-          lastUsedAt: new Date().toISOString(),
-        });
-        wsClient.sendTerminalCwd({ terminalSessionId: data.terminalSessionId, cwd: result.cwd });
-
-        console.log(chalk.green(`[Claude] Session resumed: ${data.terminalSessionId}`));
-      } catch (error: any) {
-        console.error(chalk.red(`[Claude] Failed to resume: ${error.message}`));
+      // Resolve the directory path
+      let resolvedDir = data.directory;
+      if (resolvedDir === '~' || resolvedDir.startsWith('~/')) {
+        resolvedDir = resolvedDir === '~' ? os.homedir() : resolvedDir.replace('~', os.homedir());
       }
+      resolvedDir = path.resolve(resolvedDir);
+
+      // Register session info for later use when message is sent (don't spawn yet)
+      claudeProcessManager.registerSession(data.sessionKey, resolvedDir, data.terminalSessionId);
+
+      wsClient.sendToolStatusUpdate('claude_code', 'active');
+      wsClient.sendClaudeSessionUpdate({
+        sessionKey: data.sessionKey,
+        directory: data.directory,
+        state: 'active',
+        lastUsedAt: new Date().toISOString(),
+      });
+      wsClient.sendTerminalCwd({ terminalSessionId: data.terminalSessionId, cwd: resolvedDir });
+
+      console.log(chalk.green(`[Claude] Session ready (will spawn on first message): ${data.sessionKey}`));
     });
 
     // Handle directory listing requests
@@ -803,30 +811,32 @@ async function startConnection(): Promise<void> {
       claudeProcessManager.handleApprovalResponse(data.approvalId, data.response);
     });
 
-    // Handle user messages from mobile app (send to active Claude session)
+    // Handle user messages from mobile app (send to Claude session)
     wsClient.on('user_message', async (data: any) => {
       // SECURITY: Don't log message content - may contain sensitive prompts
       console.log(chalk.cyan(`[Claude] User message received (${data.message.length} chars)`));
 
-      // Find the active Claude session to send the message to
-      const activeSessions = claudeProcessManager.getActiveSessions();
+      // The session should have been registered via claude_resume_session
+      // sendInput will spawn the process if needed using the registered session info
+      const terminalSessionId = data.sessionKey; // Use sessionKey as terminalSessionId
 
-      if (activeSessions.length === 0) {
-        console.log(chalk.yellow(`[Claude] No active Claude session to send message to`));
+      if (!terminalSessionId) {
+        console.log(chalk.yellow(`[Claude] No sessionKey provided in user_message`));
         return;
       }
 
-      // If sessionKey is provided, try to find matching session
-      let targetSession = activeSessions[0]; // Default to first active session
-      if (data.sessionKey) {
-        const matchingSession = activeSessions.find(s => s.sessionKey === data.sessionKey);
-        if (matchingSession) {
-          targetSession = matchingSession;
-        }
+      // Check if this session is registered (either active or registered for later spawn)
+      if (!claudeProcessManager.isClaudeSession(terminalSessionId)) {
+        console.log(chalk.yellow(`[Claude] Session not registered: ${terminalSessionId}`));
+        console.log(chalk.dim(`[Claude] Hint: Mobile should send claude_resume_session first`));
+        return;
       }
 
-      console.log(chalk.dim(`[Claude] Sending to session: ${targetSession.terminalSessionId}`));
-      claudeProcessManager.sendInput(targetSession.terminalSessionId, data.message + '\n');
+      console.log(chalk.dim(`[Claude] Sending to session: ${terminalSessionId}`));
+      const sent = await claudeProcessManager.sendInput(terminalSessionId, data.message + '\n');
+      if (!sent) {
+        console.log(chalk.yellow(`[Claude] Failed to send message - session may need restart`));
+      }
     });
 
     // Handle Claude process end
