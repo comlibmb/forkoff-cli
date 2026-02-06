@@ -98,7 +98,7 @@ class ApiClient {
   // Health check
   async healthCheck(): Promise<boolean> {
     try {
-      const response = await this.client.get(`${this.getBaseUrl().replace('/api', '')}/`, {
+      const response = await this.client.get(`${this.getBaseUrl().replace(/\/api$/, '')}/`, {
         validateStatus: () => true, // Accept any status code
       });
       // Server is up if we get any response (even 404)
