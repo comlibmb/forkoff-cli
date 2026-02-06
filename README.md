@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="ForkOff Logo" width="200"/>
+  <img src="https://www.forkoff.app/images/logo.png" alt="ForkOff Logo" width="200"/>
 </p>
 
 <h1 align="center">ForkOff CLI</h1>
