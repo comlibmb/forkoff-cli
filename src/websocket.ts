@@ -29,6 +29,7 @@ interface ClaudeResumeRequest {
   directory: string;
   terminalSessionId: string;
   requestedBy: string;
+  dangerouslySkipPermissions?: boolean;
 }
 
 interface UserMessageRequest {
@@ -45,6 +46,7 @@ interface ClaudeStartRequest {
   directory: string;
   terminalSessionId: string;
   requestedBy: string;
+  dangerouslySkipPermissions?: boolean;
 }
 
 interface DirectoryListRequest {
@@ -305,10 +307,10 @@ class WebSocketClient extends EventEmitter {
     this.socket?.emit('claude_session_update', session);
   }
 
-  // Send multiple Claude sessions (batch update)
+  // Send multiple Claude sessions as a single batch event
   sendClaudeSessions(sessions: ClaudeSessionUpdate[]): void {
-    for (const session of sessions) {
-      this.sendClaudeSessionUpdate(session);
+    if (sessions.length > 0) {
+      this.socket?.emit('claude_session_batch_update', { sessions });
     }
   }
 
