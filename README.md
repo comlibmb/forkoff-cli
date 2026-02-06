@@ -22,23 +22,16 @@
 
 ForkOff CLI connects your development machine to the ForkOff mobile app, enabling you to:
 
-- 📱 **Control AI coding sessions** from your phone
-- ✅ **Approve code changes** on the go
-- 💬 **Send prompts** to Claude, Cursor, and other AI tools
-- 📊 **Monitor progress** in real-time
-- 🔔 **Get notifications** for permission requests
+- **Control AI coding sessions** from your phone
+- **Approve code changes** on the go
+- **Send prompts** to Claude, Cursor, and other AI tools
+- **Monitor progress** in real-time
+- **Get notifications** for permission requests
 
 ## Installation
 
 ```bash
-# Install globally via npm
-npm install -g forkoff-cli
-
-# Or clone and link for development
-git clone https://github.com/Forkoff-app/forkoff-cli.git
-cd forkoff-cli
-npm install
-npm link
+npm install -g forkoff
 ```
 
 ## Quick Start
@@ -97,7 +90,7 @@ forkoff config --reset
 Integrate ForkOff into your AI coding tools:
 
 ```typescript
-import { createIntegration } from 'forkoff-cli';
+import { createIntegration } from 'forkoff';
 
 const forkoff = createIntegration();
 
@@ -133,7 +126,7 @@ if (approval.status === 'approved') {
 }
 
 // Send terminal output
-forkoff.sendTerminalOutput(sessionId, '> npm install\n✓ Done', 'stdout');
+forkoff.sendTerminalOutput(sessionId, '> npm install\n Done', 'stdout');
 forkoff.sendTerminalExit(sessionId, 0);
 
 // Update device status
@@ -157,14 +150,7 @@ Configuration files are stored at:
 ## Requirements
 
 - Node.js 18+
-- ForkOff mobile app ([iOS](https://apps.apple.com/app/forkoff) / [Android](https://play.google.com/store/apps/details?id=com.forkoff.app))
-
----
-
-## Related Projects
-
-- [ForkOff Mobile App](https://github.com/Forkoff-app/forkoff-react-native) - React Native mobile app
-- [ForkOff Backend](https://github.com/Forkoff-app/forkoff-backend) - API server
+- ForkOff mobile app
 
 ---
 
