@@ -1,0 +1,10 @@
+src/
+*.ts
+!dist/**/*.d.ts
+tsconfig.json
+.git/
+.github/
+.claude/
+.env
+*.log
+assets/

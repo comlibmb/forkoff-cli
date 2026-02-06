@@ -1,5 +1,5 @@
 {
-  "name": "forkoff-cli",
+  "name": "forkoff",
   "version": "1.0.0",
   "description": "CLI tool for ForkOff - Connect your AI coding tools to mobile",
   "main": "dist/integration.js",
@@ -16,6 +16,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "watch": "tsc -w"
