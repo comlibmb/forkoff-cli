@@ -58,8 +58,8 @@ interface DeviceConfig {
 const defaultConfig: DeviceConfig = {
   deviceId: null,
   deviceName: os.hostname(),
-  apiUrl: 'http://localhost:3000/api',
-  wsUrl: 'ws://localhost:3000',
+  apiUrl: 'https://api.forkoff.app/api',
+  wsUrl: 'wss://api.forkoff.app',
   pairingCode: null,
   pairedAt: null,
   userId: null,
