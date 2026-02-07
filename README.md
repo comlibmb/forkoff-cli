@@ -64,6 +64,10 @@ Keep this running to receive commands from your mobile app.
 | `forkoff status` | Check connection status |
 | `forkoff disconnect` | Disconnect from server |
 | `forkoff config` | View/modify configuration |
+| `forkoff startup` | Manage automatic startup on login |
+| `forkoff startup --enable` | Enable automatic startup |
+| `forkoff startup --disable` | Disable automatic startup |
+| `forkoff startup --status` | Show startup registration status |
 
 ### Configuration Options
 
@@ -82,6 +86,41 @@ forkoff config --name "My MacBook Pro"
 
 # Reset all configuration
 forkoff config --reset
+```
+
+### Global Options
+
+| Option | Description |
+|--------|-------------|
+| `-q, --quiet` | Suppress all output (for background operation) |
+
+### Background Operation
+
+Run ForkOff silently in the background with no console output:
+
+```bash
+forkoff connect --quiet
+```
+
+This is used by the automatic startup feature and is useful for running ForkOff as a background service.
+
+### Automatic Startup
+
+When you run `forkoff pair` or `forkoff connect`, ForkOff automatically registers itself to start on login. This means you don't need to manually run `forkoff connect` every time you start your computer.
+
+- **Windows**: Uses Task Scheduler (`ForkOffCLI` task, runs on logon)
+- **macOS**: Uses launchd (`~/Library/LaunchAgents/app.forkoff.cli.plist`)
+
+To opt out:
+
+```bash
+forkoff startup --disable
+```
+
+Once disabled, `pair` and `connect` will not re-register startup. To re-enable:
+
+```bash
+forkoff startup --enable
 ```
 
 ---

@@ -2,7 +2,6 @@
 
 import { Command } from 'commander';
 import chalk from 'chalk';
-import ora from 'ora';
 import qrcode from 'qrcode-terminal';
 import { config } from './config';
 import { api } from './api';
@@ -11,6 +10,8 @@ import { terminalManager } from './terminal';
 import { approvalManager } from './approval';
 import { toolDetector, claudeHooksManager, claudeSessionDetector, claudeProcessManager } from './tools';
 import { transcriptStreamer } from './transcript-streamer';
+import { setQuiet, createSpinner } from './logger';
+import { enableStartup, disableStartup, isStartupRegistered, getBinaryPath } from './startup';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -20,7 +21,14 @@ const program = new Command();
 program
   .name('forkoff')
   .description('CLI tool for ForkOff - Connect your AI coding tools to mobile')
-  .version('1.0.0');
+  .version('1.0.0')
+  .option('-q, --quiet', 'Suppress all output (for background operation)');
+
+program.hook('preAction', () => {
+  if (program.opts().quiet) {
+    setQuiet(true);
+  }
+});
 
 // Configure API/WS URLs
 program
@@ -61,6 +69,10 @@ program
       console.log(`  Device ID:   ${chalk.cyan(config.deviceId || 'Not registered')}`);
       console.log(`  Paired:      ${config.isPaired ? chalk.green('Yes') : chalk.yellow('No')}`);
       console.log(`  Config Path: ${chalk.dim(config.getPath())}`);
+      const startupStatus = config.startupEnabled === null
+        ? chalk.dim('Not configured')
+        : config.startupEnabled ? chalk.green('Enabled') : chalk.yellow('Disabled');
+      console.log(`  Startup:     ${startupStatus}`);
     }
   });
 
@@ -69,7 +81,7 @@ program
   .command('pair')
   .description('Generate pairing code to connect with mobile app')
   .action(async () => {
-    const spinner = ora('Connecting to ForkOff server...').start();
+    const spinner = createSpinner('Connecting to ForkOff server...').start();
 
     try {
       // Check server health
@@ -125,6 +137,16 @@ program
 
       await waitForPairing(result.device.id);
 
+      // Auto-register startup if not explicitly disabled
+      if (config.startupEnabled !== false) {
+        try {
+          await enableStartup();
+          console.log(chalk.green('Automatic startup registered. Use "forkoff startup --disable" to opt out.'));
+        } catch {
+          // Non-critical — don't fail pairing over this
+        }
+      }
+
       // Auto-connect after successful pairing
       await startConnection();
     } catch (error: any) {
@@ -143,7 +165,7 @@ program
       return;
     }
 
-    const spinner = ora('Checking status...').start();
+    const spinner = createSpinner('Checking status...').start();
 
     try {
       const status = await api.checkPairingStatus(config.deviceId);
@@ -187,6 +209,16 @@ program
       return;
     }
 
+    // Auto-register startup if not explicitly disabled and not already registered
+    if (config.startupEnabled !== false && !isStartupRegistered()) {
+      try {
+        await enableStartup();
+        console.log(chalk.green('Automatic startup registered. Use "forkoff startup --disable" to opt out.'));
+      } catch {
+        // Non-critical
+      }
+    }
+
     await startConnection();
   });
 
@@ -204,6 +236,55 @@ program
     console.log(chalk.dim('Run "forkoff pair" to pair again.'));
   });
 
+// Manage startup registration
+program
+  .command('startup')
+  .description('Manage automatic startup on login')
+  .option('--enable', 'Enable automatic startup')
+  .option('--disable', 'Disable automatic startup')
+  .option('--status', 'Show startup status (default)')
+  .action(async (options) => {
+    if (options.enable) {
+      try {
+        await enableStartup();
+        console.log(chalk.green('Automatic startup enabled.'));
+        console.log(chalk.dim(`Binary: ${getBinaryPath()}`));
+        console.log(chalk.dim('ForkOff will connect automatically when you log in.'));
+      } catch (error: any) {
+        console.error(chalk.red(`Failed to enable startup: ${error.message}`));
+      }
+      return;
+    }
+
+    if (options.disable) {
+      try {
+        await disableStartup();
+        console.log(chalk.green('Automatic startup disabled.'));
+        console.log(chalk.dim('ForkOff will no longer start on login.'));
+      } catch (error: any) {
+        console.error(chalk.red(`Failed to disable startup: ${error.message}`));
+      }
+      return;
+    }
+
+    // Default: show status
+    const registered = isStartupRegistered();
+    const configState = config.startupEnabled;
+
+    console.log(chalk.bold('\nStartup Status:'));
+    console.log(`  OS Registration: ${registered ? chalk.green('Registered') : chalk.yellow('Not registered')}`);
+    console.log(`  Config State:    ${
+      configState === null ? chalk.dim('Not configured') :
+      configState ? chalk.green('Enabled') : chalk.yellow('Disabled')
+    }`);
+    try {
+      console.log(`  Binary Path:     ${chalk.dim(getBinaryPath())}`);
+    } catch {
+      console.log(`  Binary Path:     ${chalk.red('Not found')}`);
+    }
+    console.log(`  Platform:        ${chalk.dim(process.platform)}`);
+  });
+
 // Detect and manage AI coding tools
 program
   .command('tools')
@@ -214,7 +295,7 @@ program
   .option('-w, --watch', 'Watch tool status changes')
   .action(async (options) => {
     if (options.installHooks) {
-      const spinner = ora('Installing Claude Code hooks...').start();
+      const spinner = createSpinner('Installing Claude Code hooks...').start();
       try {
         if (!claudeHooksManager.canConfigure()) {
           spinner.fail('Claude Code not found');
@@ -235,7 +316,7 @@ program
     }
 
     if (options.uninstallHooks) {
-      const spinner = ora('Removing Claude Code hooks...').start();
+      const spinner = createSpinner('Removing Claude Code hooks...').start();
       try {
         await claudeHooksManager.uninstallHooks();
         spinner.succeed('Claude Code hooks removed!');
@@ -266,7 +347,7 @@ program
     }
 
     // Default: detect tools
-    const spinner = ora('Detecting AI coding tools...').start();
+    const spinner = createSpinner('Detecting AI coding tools...').start();
 
     try {
       const result = await toolDetector.detectAll();
@@ -324,7 +405,7 @@ program
 
 // Helper function to start connection and set up event handlers
 async function startConnection(): Promise<void> {
-  const spinner = ora('Connecting to ForkOff...').start();
+  const spinner = createSpinner('Connecting to ForkOff...').start();
 
   try {
     await wsClient.connect();

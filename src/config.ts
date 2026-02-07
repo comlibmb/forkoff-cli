@@ -53,6 +53,8 @@ interface DeviceConfig {
   pairedAt: string | null;
   userId: string | null;
   machineId?: string;
+  startupEnabled: boolean | null;
+  startupBinaryPath: string | null;
 }
 
 const defaultConfig: DeviceConfig = {
@@ -63,6 +65,8 @@ const defaultConfig: DeviceConfig = {
   pairingCode: null,
   pairedAt: null,
   userId: null,
+  startupEnabled: null,
+  startupBinaryPath: null,
 };
 
 class Config {
@@ -166,6 +170,24 @@ class Config {
 
   set userId(value: string | null) {
     this.data.userId = value;
+    this.save();
+  }
+
+  get startupEnabled(): boolean | null {
+    return this.data.startupEnabled;
+  }
+
+  set startupEnabled(value: boolean | null) {
+    this.data.startupEnabled = value;
+    this.save();
+  }
+
+  get startupBinaryPath(): string | null {
+    return this.data.startupBinaryPath;
+  }
+
+  set startupBinaryPath(value: string | null) {
+    this.data.startupBinaryPath = value;
     this.save();
   }
 
