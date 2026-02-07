@@ -145,22 +145,10 @@ class ClaudeSessionDetector extends EventEmitter {
       const fileName = path.basename(filePath, '.jsonl');
 
       // Try to decode the project directory name to get the actual path
-      let directory = projectDir;
-      try {
-        // Claude encodes paths - try to decode
-        // Format is usually: C--Users-User-Desktop-project or similar
-        directory = projectDir
-          .replace(/--/g, ':')
-          .replace(/-/g, path.sep)
-          .replace(/:/g, path.sep);
-
-        // Handle Windows drive letters
-        if (os.platform() === 'win32' && directory.match(/^[A-Z]\\/i)) {
-          directory = directory.charAt(0) + ':' + directory.slice(1);
-        }
-      } catch {
-        // Keep the encoded version
-      }
+      // Claude encodes paths: \ or / become -, : becomes --
+      // We must validate against the filesystem to preserve literal hyphens
+      // in directory names (e.g. Dev-SharbelAS should NOT become Dev\SharbelAS)
+      let directory = this.decodeProjectDir(projectDir);
 
       // Try to read the first line to get session ID
       const content = fs.readFileSync(filePath, 'utf8');
@@ -186,6 +174,86 @@ class ClaudeSessionDetector extends EventEmitter {
     } catch (error) {
       return null;
     }
+  }
+
+  /**
+   * Decode a Claude-encoded project directory name back to a real path.
+   * Claude encodes: path separators (\ /) → hyphen (-), colon (:) → double hyphen (--)
+   * This uses filesystem validation to preserve literal hyphens in directory names.
+   */
+  private decodeProjectDir(encodedDir: string): string {
+    let remaining = encodedDir;
+    let rootPath = '';
+
+    if (os.platform() === 'win32') {
+      // Handle Windows drive letter: C-- → C:\
+      const driveMatch = remaining.match(/^([A-Z])--(.+)$/i);
+      if (driveMatch) {
+        rootPath = driveMatch[1] + ':\\';
+        remaining = driveMatch[2];
+      }
+    } else {
+      rootPath = '/';
+    }
+
+    const resolved = this.resolveEncodedPath(rootPath, remaining);
+    if (resolved) return resolved;
+
+    // Fallback: naive replacement (original behavior)
+    let fallback = encodedDir
+      .replace(/--/g, ':')
+      .replace(/-/g, path.sep)
+      .replace(/:/g, path.sep);
+    if (os.platform() === 'win32' && fallback.match(/^[A-Z]\\/i)) {
+      fallback = fallback.charAt(0) + ':' + fallback.slice(1);
+    }
+    return fallback;
+  }
+
+  /**
+   * Recursively resolve an encoded path segment by matching against actual
+   * filesystem entries. Prefers longest directory name matches to correctly
+   * handle names containing hyphens (e.g. "Dev-SharbelAS").
+   */
+  private resolveEncodedPath(basePath: string, remaining: string): string | null {
+    if (!remaining) return basePath;
+
+    // No hyphens left — this is the final segment
+    if (!remaining.includes('-')) {
+      return path.join(basePath, remaining);
+    }
+
+    try {
+      if (fs.existsSync(basePath) && fs.statSync(basePath).isDirectory()) {
+        const entries = fs.readdirSync(basePath)
+          .filter(e => {
+            try { return fs.statSync(path.join(basePath, e)).isDirectory(); }
+            catch { return false; }
+          })
+          .sort((a, b) => b.length - a.length); // longest match first
+
+        for (const entry of entries) {
+          // Exact match (last segment)
+          if (remaining === entry) {
+            return path.join(basePath, entry);
+          }
+          // Entry followed by a hyphen (which is the path separator)
+          if (remaining.startsWith(entry + '-')) {
+            const rest = remaining.slice(entry.length + 1);
+            const resolved = this.resolveEncodedPath(path.join(basePath, entry), rest);
+            if (resolved) return resolved;
+          }
+        }
+      }
+    } catch {
+      // Fall through
+    }
+
+    // No filesystem match at this level — treat first hyphen as separator
+    const firstHyphen = remaining.indexOf('-');
+    const segment = remaining.slice(0, firstHyphen);
+    const rest = remaining.slice(firstHyphen + 1);
+    return this.resolveEncodedPath(path.join(basePath, segment), rest);
   }
 
   /**

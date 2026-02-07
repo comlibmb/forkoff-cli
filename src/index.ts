@@ -517,8 +517,15 @@ async function startConnection(): Promise<void> {
     wsClient.on('claude_resume_session', async (data: any) => {
       console.log(chalk.cyan(`[Claude] Resume session request: ${data.sessionKey} in ${data.directory}`));
 
-      // Resolve the directory path
+      // Look up the correct directory from our locally scanned sessions
+      // The mobile app may have a cached/stale directory (e.g. with corrupted hyphens)
       let resolvedDir = data.directory;
+      const knownSession = claudeSessionDetector.getSessions().find(s => s.sessionKey === data.sessionKey);
+      if (knownSession && knownSession.directory) {
+        console.log(chalk.dim(`[Claude] Using local directory for session: ${knownSession.directory}`));
+        resolvedDir = knownSession.directory;
+      }
+
       if (resolvedDir === '~' || resolvedDir.startsWith('~/')) {
         resolvedDir = resolvedDir === '~' ? os.homedir() : resolvedDir.replace('~', os.homedir());
       }
