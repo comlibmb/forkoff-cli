@@ -1,6 +1,6 @@
 {
   "name": "forkoff",
-  "version": "1.0.4",
+  "version": "1.0.6",
   "description": "CLI tool for ForkOff - Connect your AI coding tools to mobile",
   "main": "dist/integration.js",
   "types": "dist/integration.d.ts",
