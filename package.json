@@ -1,9 +1,18 @@
 {
   "name": "forkoff",
   "version": "1.0.6",
-  "description": "CLI tool for ForkOff - Connect your AI coding tools to mobile",
+  "description": "CLI tool for ForkOff - Connect your AI coding tools to mobile. Currently in waitlist - join at forkoff.app",
   "main": "dist/integration.js",
   "types": "dist/integration.d.ts",
+  "homepage": "https://forkoff.app",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Forkoff-app/forkoff-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Forkoff-app/forkoff-cli/issues",
+    "email": "support@forkoff.app"
+  },
   "bin": {
     "forkoff": "./dist/index.js"
   },
@@ -27,9 +36,14 @@
     "coding",
     "mobile",
     "claude",
-    "forkoff"
+    "forkoff",
+    "waitlist"
   ],
-  "author": "",
+  "author": {
+    "name": "ForkOff",
+    "email": "support@forkoff.app",
+    "url": "https://forkoff.app"
+  },
   "license": "Proprietary",
   "dependencies": {
     "axios": "^1.13.2",
