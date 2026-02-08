@@ -233,13 +233,17 @@ class ClaudeSessionDetector extends EventEmitter {
           .sort((a, b) => b.length - a.length); // longest match first
 
         for (const entry of entries) {
+          // Claude encodes underscores, spaces, and other chars as hyphens in
+          // project directory names, so normalize both sides for comparison.
+          const encodedEntry = entry.replace(/[_ ]/g, '-');
+
           // Exact match (last segment)
-          if (remaining === entry) {
+          if (remaining === encodedEntry) {
             return path.join(basePath, entry);
           }
           // Entry followed by a hyphen (which is the path separator)
-          if (remaining.startsWith(entry + '-')) {
-            const rest = remaining.slice(entry.length + 1);
+          if (remaining.startsWith(encodedEntry + '-')) {
+            const rest = remaining.slice(encodedEntry.length + 1);
             const resolved = this.resolveEncodedPath(path.join(basePath, entry), rest);
             if (resolved) return resolved;
           }
