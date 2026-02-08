@@ -667,6 +667,85 @@ async function startConnection(): Promise<void> {
       }
     });
 
+    // Handle read file requests from mobile (e.g., CLAUDE.md)
+    wsClient.on('read_file', async (data: any) => {
+      console.log(chalk.dim(`[File] Read request: ${data.filePath}`));
+      try {
+        // SECURITY: Whitelist of allowed filenames
+        const allowedFiles = ['CLAUDE.md', 'README.md', 'package.json'];
+        const fileName = path.basename(data.filePath);
+
+        if (!allowedFiles.includes(fileName)) {
+          console.warn(chalk.yellow(`[File] Access denied - file not in whitelist: ${fileName}`));
+          wsClient.sendReadFileResponse({
+            requestId: data.requestId,
+            exists: false,
+            fileName,
+            error: 'File not allowed',
+          });
+          return;
+        }
+
+        // Resolve path
+        let resolvedPath = data.filePath;
+        if (resolvedPath === '~' || resolvedPath.startsWith('~/')) {
+          resolvedPath = resolvedPath === '~' ? os.homedir() : resolvedPath.replace('~', os.homedir());
+        }
+        resolvedPath = path.resolve(resolvedPath);
+
+        // SECURITY: Only allow access under home directory
+        const homeDir = os.homedir();
+        if (!resolvedPath.startsWith(homeDir)) {
+          console.warn(chalk.yellow(`[File] Access denied - path outside home directory: ${resolvedPath}`));
+          wsClient.sendReadFileResponse({
+            requestId: data.requestId,
+            exists: false,
+            fileName,
+            error: 'Path outside home directory',
+          });
+          return;
+        }
+
+        // Check if file exists
+        if (!fs.existsSync(resolvedPath)) {
+          wsClient.sendReadFileResponse({
+            requestId: data.requestId,
+            exists: false,
+            fileName,
+          });
+          return;
+        }
+
+        // SECURITY: Check file size (max 100KB)
+        const stats = fs.statSync(resolvedPath);
+        if (stats.size > 100 * 1024) {
+          wsClient.sendReadFileResponse({
+            requestId: data.requestId,
+            exists: true,
+            fileName,
+            error: 'File too large (max 100KB)',
+          });
+          return;
+        }
+
+        const content = fs.readFileSync(resolvedPath, 'utf-8');
+        wsClient.sendReadFileResponse({
+          requestId: data.requestId,
+          content,
+          exists: true,
+          fileName,
+        });
+      } catch (error: any) {
+        console.error(chalk.red(`[File] Error: ${error.message}`));
+        wsClient.sendReadFileResponse({
+          requestId: data.requestId,
+          exists: false,
+          fileName: path.basename(data.filePath),
+          error: error.message,
+        });
+      }
+    });
+
     // Handle transcript fetch requests from mobile
     wsClient.on('transcript_fetch', async (data: any) => {
       console.log(chalk.dim(`[Transcript] Fetching: ${data.sessionKey}, offset: ${data.offset}, limit: ${data.limit}, reverse: ${data.reverse}`));

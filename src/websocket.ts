@@ -55,6 +55,12 @@ interface DirectoryListRequest {
   requestedBy: string;
 }
 
+interface ReadFileRequest {
+  filePath: string;
+  requestId: string;
+  requestedBy: string;
+}
+
 interface ClaudeSessionUpdate {
   sessionKey: string;
   directory: string;
@@ -258,6 +264,12 @@ class WebSocketClient extends EventEmitter {
         this.emit('rpc_request', data);
       });
 
+      // Listen for read file requests from mobile app
+      this.socket.on('read_file', (data: ReadFileRequest) => {
+        console.log(`[WS] Received read_file: ${data.filePath}`);
+        this.emit('read_file', data);
+      });
+
       // Listen for Claude approval responses from mobile
       this.socket.on('claude_approval_response', (data: ClaudeApprovalResponse) => {
         console.log(`[WS] Received claude_approval_response: ${data.approvalId}, response: ${data.response}`);
@@ -356,6 +368,17 @@ class WebSocketClient extends EventEmitter {
     currentPath: string;
   }): void {
     this.socket?.emit('directory_list_response', data);
+  }
+
+  // Send read file response
+  sendReadFileResponse(data: {
+    requestId: string;
+    content?: string;
+    exists: boolean;
+    fileName: string;
+    error?: string;
+  }): void {
+    this.socket?.emit('read_file_response', data);
   }
 
   // Send file change notification
