@@ -115,7 +115,7 @@ interface ClaudeApprovalResponse {
   respondedBy: string;
 }
 
-class WebSocketClient extends EventEmitter {
+export class WebSocketClient extends EventEmitter {
   private socket: Socket | null = null;
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 10;
