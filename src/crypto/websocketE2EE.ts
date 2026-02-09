@@ -155,33 +155,23 @@ export class WebSocketE2EEIntegration {
   // Private WebSocket emit methods
 
   private emitKeyExchangeInit(recipientDeviceId: string, ephemeralPublicKey: string): void {
-    // Access the internal socket via type casting
-    const socket = (this.wsClient as any).socket;
-    if (socket) {
-      socket.emit('encrypted_key_exchange_init', {
-        recipientDeviceId,
-        senderDeviceId: this.e2eeManager?.['deviceId'],
-        ephemeralPublicKey,
-      });
-    }
+    this.wsClient.emitKeyExchangeInit({
+      recipientDeviceId,
+      senderDeviceId: this.e2eeManager?.['deviceId'] || '',
+      ephemeralPublicKey,
+    });
   }
 
   private emitKeyExchangeAck(recipientDeviceId: string, ephemeralPublicKey: string): void {
-    const socket = (this.wsClient as any).socket;
-    if (socket) {
-      socket.emit('encrypted_key_exchange_ack', {
-        recipientDeviceId,
-        senderDeviceId: this.e2eeManager?.['deviceId'],
-        ephemeralPublicKey,
-      });
-    }
+    this.wsClient.emitKeyExchangeAck({
+      recipientDeviceId,
+      senderDeviceId: this.e2eeManager?.['deviceId'] || '',
+      ephemeralPublicKey,
+    });
   }
 
   private emitEncryptedMessage(message: EncryptedMessage): void {
-    const socket = (this.wsClient as any).socket;
-    if (socket) {
-      socket.emit('encrypted_message', message);
-    }
+    this.wsClient.emitEncryptedMessage(message);
   }
 }
 

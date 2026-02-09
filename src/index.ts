@@ -586,7 +586,7 @@ async function startConnection(): Promise<void> {
         wsClient.sendTerminalCwd({ terminalSessionId: data.terminalSessionId, cwd: result.cwd });
 
         // Notify mobile that the session is ready for input
-        wsClient.socket?.emit('claude_session_event', {
+        wsClient.sendClaudeSessionEvent({
           sessionKey: data.terminalSessionId,
           event: { type: 'ready' },
         });

@@ -466,6 +466,35 @@ export class WebSocketClient extends EventEmitter {
     this.socket?.emit('task_progress', data);
   }
 
+  // E2EE event emitters
+  emitKeyExchangeInit(data: {
+    recipientDeviceId: string;
+    senderDeviceId: string;
+    ephemeralPublicKey: string;
+  }): void {
+    this.socket?.emit('encrypted_key_exchange_init', data);
+  }
+
+  emitKeyExchangeAck(data: {
+    recipientDeviceId: string;
+    senderDeviceId: string;
+    ephemeralPublicKey: string;
+  }): void {
+    this.socket?.emit('encrypted_key_exchange_ack', data);
+  }
+
+  emitEncryptedMessage(data: any): void {
+    this.socket?.emit('encrypted_message', data);
+  }
+
+  // Send Claude session event
+  sendClaudeSessionEvent(data: {
+    sessionKey: string;
+    event: { type: string; [key: string]: any };
+  }): void {
+    this.socket?.emit('claude_session_event', data);
+  }
+
   get isConnected(): boolean {
     return this.socket?.connected ?? false;
   }
