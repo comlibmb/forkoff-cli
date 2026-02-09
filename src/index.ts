@@ -585,6 +585,12 @@ async function startConnection(): Promise<void> {
         wsClient.sendToolStatusUpdate('claude_code', 'active');
         wsClient.sendTerminalCwd({ terminalSessionId: data.terminalSessionId, cwd: result.cwd });
 
+        // Notify mobile that the session is ready for input
+        wsClient.socket?.emit('claude_session_event', {
+          sessionKey: data.terminalSessionId,
+          event: { type: 'ready' },
+        });
+
         console.log(chalk.green(`[Claude] Session started: ${data.terminalSessionId}`));
       } catch (error: any) {
         console.error(chalk.red(`[Claude] Failed to start: ${error.message}`));
