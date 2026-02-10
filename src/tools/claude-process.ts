@@ -16,6 +16,7 @@ interface ClaudeProcessInfo {
   sessionKey?: string;
   outputBuffer: string[]; // Recent output lines for context
   wasAutoRestarted?: boolean; // Track if this was an auto-restart
+  dangerouslySkipPermissions?: boolean; // Unrestricted mode from mobile
 }
 
 /**
@@ -189,6 +190,7 @@ interface ClaudeProcessManagerEvents {
   session_ended: [event: SessionEndedEvent];
   sdk_message: [event: SdkMessageEvent];
   claude_approval_request: [request: ClaudeApprovalRequest];
+  tool_activity: [event: ToolActivityEvent];
   thinking_content: [event: ThinkingContentEvent];
   token_usage: [event: TokenUsageEvent];
   task_progress: [event: TaskProgressEvent];
@@ -201,6 +203,16 @@ interface SessionRestartInfo {
   lastExitCode: number;
   lastExitTime: number;
   restartCount: number;
+  dangerouslySkipPermissions?: boolean;
+}
+
+/** Tool activity event — non-blocking notification of tool execution */
+interface ToolActivityEvent {
+  terminalSessionId: string;
+  sessionKey?: string;
+  toolName: string;
+  toolId: string;
+  inputSummary: string;
 }
 
 class ClaudeProcessManager extends EventEmitter {
@@ -232,7 +244,7 @@ class ClaudeProcessManager extends EventEmitter {
   /**
    * Start a new Claude session in the specified directory
    */
-  async startSession(directory: string, terminalSessionId: string): Promise<{ cwd: string }> {
+  async startSession(directory: string, terminalSessionId: string, dangerouslySkipPermissions?: boolean): Promise<{ cwd: string }> {
     const resolvedDir = this.resolvePath(directory);
 
     // SDK flags for structured JSON communication
@@ -240,8 +252,12 @@ class ClaudeProcessManager extends EventEmitter {
       '--output-format', 'stream-json', // JSONL output from Claude
       '--input-format', 'stream-json',  // JSONL input to Claude
       '--verbose',                      // Complete messages
-      // '--permission-mode' removed - using default mode for tool execution
     ];
+
+    // Add unrestricted mode flag when enabled from mobile
+    if (dangerouslySkipPermissions) {
+      args.push('--dangerouslySkipPermissions');
+    }
 
     // SECURITY: Using cross-spawn instead of shell: true to prevent command injection
     const proc = spawn('claude', args, {
@@ -251,7 +267,7 @@ class ClaudeProcessManager extends EventEmitter {
     });
 
     this.setupProcessHandlers(terminalSessionId, proc, resolvedDir);
-    this.processes.set(terminalSessionId, { terminalSessionId, process: proc, directory: resolvedDir, outputBuffer: [], wasAutoRestarted: false });
+    this.processes.set(terminalSessionId, { terminalSessionId, process: proc, directory: resolvedDir, outputBuffer: [], wasAutoRestarted: false, dangerouslySkipPermissions: !!dangerouslySkipPermissions });
 
     return { cwd: resolvedDir };
   }
@@ -259,20 +275,24 @@ class ClaudeProcessManager extends EventEmitter {
   /**
    * Resume an existing Claude session
    */
-  async resumeSession(sessionKey: string, directory: string, terminalSessionId: string): Promise<{ cwd: string }> {
+  async resumeSession(sessionKey: string, directory: string, terminalSessionId: string, dangerouslySkipPermissions?: boolean): Promise<{ cwd: string }> {
     const resolvedDir = this.resolvePath(directory);
 
     // SDK flags for structured JSON communication
-    // When resuming from mobile, use acceptEdits to auto-approve file operations
-    // This is necessary because SDK JSON streaming mode interprets raw 'y' input
-    // as a user message rather than a permission approval
     const args = [
       '--resume', sessionKey,           // Pass session key to --resume!
       '--output-format', 'stream-json', // JSONL output from Claude
       '--input-format', 'stream-json',  // JSONL input to Claude
       '--verbose',                      // Complete messages
-      '--permission-mode', 'acceptEdits', // Auto-approve edits when controlled from mobile
     ];
+
+    // When unrestricted mode is enabled, use --dangerouslySkipPermissions for full access
+    // Otherwise fall back to --permission-mode acceptEdits for auto-approving file edits
+    if (dangerouslySkipPermissions) {
+      args.push('--dangerouslySkipPermissions');
+    } else {
+      args.push('--permission-mode', 'acceptEdits');
+    }
 
     console.log(`[Claude Process] Spawning: claude ${args.join(' ')}`);
 
@@ -284,7 +304,7 @@ class ClaudeProcessManager extends EventEmitter {
     });
 
     this.setupProcessHandlers(terminalSessionId, proc, resolvedDir, sessionKey);
-    this.processes.set(terminalSessionId, { terminalSessionId, process: proc, directory: resolvedDir, sessionKey, outputBuffer: [], wasAutoRestarted: false });
+    this.processes.set(terminalSessionId, { terminalSessionId, process: proc, directory: resolvedDir, sessionKey, outputBuffer: [], wasAutoRestarted: false, dangerouslySkipPermissions: !!dangerouslySkipPermissions });
 
     // Store session info for future message sends (needed since we spawn fresh process per message)
     this.closedSessions.set(terminalSessionId, {
@@ -293,6 +313,7 @@ class ClaudeProcessManager extends EventEmitter {
       lastExitCode: 0,
       lastExitTime: Date.now(),
       restartCount: 0,
+      dangerouslySkipPermissions: !!dangerouslySkipPermissions,
     });
 
     return { cwd: resolvedDir };
@@ -345,7 +366,7 @@ class ClaudeProcessManager extends EventEmitter {
     const jsonLine = JSON.stringify(message) + '\n';
 
     try {
-      await this.resumeSession(sessionKey, directory, terminalSessionId);
+      await this.resumeSession(sessionKey, directory, terminalSessionId, restartInfo?.dangerouslySkipPermissions);
       info = this.processes.get(terminalSessionId);
     } catch (err) {
       console.error(`[Claude Process] Failed to spawn process:`, (err as Error).message);
@@ -394,14 +415,15 @@ class ClaudeProcessManager extends EventEmitter {
    * Register session info without spawning a process.
    * Used when mobile opens a session view - we store the info so we can spawn later on first message.
    */
-  registerSession(sessionKey: string, directory: string, terminalSessionId: string): void {
-    console.log(`[Claude Process] Registering session: ${sessionKey} in ${directory}`);
+  registerSession(sessionKey: string, directory: string, terminalSessionId: string, dangerouslySkipPermissions?: boolean): void {
+    console.log(`[Claude Process] Registering session: ${sessionKey} in ${directory}${dangerouslySkipPermissions ? ' (unrestricted)' : ''}`);
     this.closedSessions.set(terminalSessionId, {
       sessionKey,
       directory,
       lastExitCode: 0,
       lastExitTime: Date.now(),
       restartCount: 0,
+      dangerouslySkipPermissions,
     });
   }
 
@@ -518,6 +540,7 @@ class ClaudeProcessManager extends EventEmitter {
         lastExitCode: exitCode,
         lastExitTime: Date.now(),
         restartCount,
+        dangerouslySkipPermissions: processInfo?.dangerouslySkipPermissions,
       });
 
       // Emit exit event
@@ -646,101 +669,15 @@ class ClaudeProcessManager extends EventEmitter {
    * @private
    */
   private checkForApprovalPattern(
-    terminalSessionId: string,
-    output: string,
-    processInfo: ClaudeProcessInfo
+    _terminalSessionId: string,
+    _output: string,
+    _processInfo: ClaudeProcessInfo
   ): void {
-    // Check if output matches any approval pattern
-    const matchedPattern = APPROVAL_PATTERNS.find(pattern => pattern.test(output));
-    if (!matchedPattern) return;
-
-    // Don't create duplicate approvals
-    for (const pending of this.pendingApprovals.values()) {
-      if (pending.terminalSessionId === terminalSessionId) {
-        console.log(`[Claude Process] Approval already pending for ${terminalSessionId}`);
-        return;
-      }
-    }
-
-    const approvalId = `approval-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const options = extractApprovalOptions(output);
-
-    console.log(`[Claude Process] Approval pattern detected: ${matchedPattern.toString()}`);
-    console.log(`[Claude Process] Options: ${options.join(', ')}`);
-
-    // Set up timeout for auto-deny
-    const timeoutId = setTimeout(() => {
-      this.handleApprovalTimeout(approvalId);
-    }, this.APPROVAL_TIMEOUT_MS);
-
-    // Track pending approval
-    this.pendingApprovals.set(approvalId, {
-      approvalId,
-      terminalSessionId,
-      createdAt: Date.now(),
-      timeoutId,
-    });
-
-    // Extract human-readable prompt from SDK JSON output
-    let promptText = output.trim();
-    let toolName = '';
-    let toolInput = '';
-
-    // Try to parse as JSON and extract meaningful content
-    try {
-      const lines = output.split('\n').filter(l => l.trim());
-      for (const line of lines) {
-        try {
-          const json = JSON.parse(line);
-          // Check for tool_use in message content
-          if (json.message?.content) {
-            const content = Array.isArray(json.message.content) ? json.message.content : [json.message.content];
-            for (const block of content) {
-              if (block.type === 'tool_use') {
-                toolName = block.name || 'Unknown tool';
-                toolInput = typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2);
-                promptText = `Claude wants to use: ${toolName}`;
-                break;
-              } else if (typeof block === 'string' && block.includes('[y]es')) {
-                promptText = block;
-                break;
-              } else if (block.text && block.text.includes('[y]es')) {
-                promptText = block.text;
-                break;
-              }
-            }
-          }
-        } catch (e) {
-          // Not JSON, might be text prompt
-          if (line.includes('[y]es') || line.includes('(y/n)')) {
-            promptText = line;
-            break;
-          }
-        }
-      }
-    } catch (e) {
-      // Keep original output
-    }
-
-    // Build context with tool details if available
-    const context = [...processInfo.outputBuffer];
-    if (toolInput && toolInput.length > 0) {
-      context.push(`Tool: ${toolName}`);
-      context.push(`Input: ${toolInput.substring(0, 500)}${toolInput.length > 500 ? '...' : ''}`);
-    }
-
-    // Emit approval request event
-    const approvalRequest: ClaudeApprovalRequest = {
-      approvalId,
-      terminalSessionId,
-      sessionKey: processInfo.sessionKey,
-      context,
-      options,
-      promptText,
-    };
-
-    this.emit('claude_approval_request', approvalRequest);
-    console.log(`[Claude Process] Emitted claude_approval_request: ${approvalId}, promptText: ${promptText.substring(0, 50)}...`);
+    // All current processes use SDK mode (--output-format stream-json).
+    // Regex-based approval detection doesn't work with JSON output — the patterns
+    // match JSON fragments rather than real interactive prompts. Skip entirely.
+    // Tool use is now reported via tool_activity events from checkForToolUseInSdkMessage().
+    return;
   }
 
   /**
@@ -767,11 +704,7 @@ class ClaudeProcessManager extends EventEmitter {
       return;
     }
 
-    // Debug: log the message structure
-    console.log(`[Claude Process] Checking assistant message for tool_use...`);
-
     if (!message.message?.content) {
-      console.log(`[Claude Process] No message.content found in assistant message`);
       return;
     }
 
@@ -779,28 +712,12 @@ class ClaudeProcessManager extends EventEmitter {
       ? message.message.content
       : [message.message.content];
 
-    // Find tool_use blocks
+    // Find tool_use blocks and emit non-blocking activity events
     for (const block of content) {
       if (block.type === 'tool_use') {
         const toolName = block.name || 'Unknown tool';
         const toolId = block.id || '';
         const toolInput = block.input || {};
-
-        // Check if we already have a pending approval for this terminal
-        let alreadyPending = false;
-        for (const pending of this.pendingApprovals.values()) {
-          if (pending.terminalSessionId === terminalSessionId) {
-            alreadyPending = true;
-            break;
-          }
-        }
-        if (alreadyPending) {
-          console.log(`[Claude Process] Tool use detected but approval already pending for ${terminalSessionId}`);
-          continue;
-        }
-
-        // Create approval notification
-        const approvalId = `tool-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
         // Format input for display
         let inputSummary = '';
@@ -816,38 +733,18 @@ class ClaudeProcessManager extends EventEmitter {
           }
         }
 
-        const promptText = `Claude is using: ${toolName}`;
-        const context = inputSummary ? [inputSummary, ...processInfo.outputBuffer.slice(-5)] : processInfo.outputBuffer.slice(-10);
+        console.log(`[Claude Process] Tool activity: ${toolName} (${toolId}) - ${inputSummary.substring(0, 80)}`);
 
-        console.log(`[Claude Process] Tool use detected: ${toolName} (${toolId})`);
-        console.log(`[Claude Process] Input summary: ${inputSummary.substring(0, 100)}`);
-
-        // Set up timeout (5 minutes to match original plan)
-        const timeoutId = setTimeout(() => {
-          console.log(`[Claude Process] Tool approval timeout: ${approvalId}`);
-          this.pendingApprovals.delete(approvalId);
-        }, 300000); // 5 minute timeout for tool notifications
-
-        // Track this notification
-        this.pendingApprovals.set(approvalId, {
-          approvalId,
-          terminalSessionId,
-          createdAt: Date.now(),
-          timeoutId,
-        });
-
-        // Emit notification to mobile
-        const approvalRequest: ClaudeApprovalRequest = {
-          approvalId,
+        // Emit non-blocking tool_activity event (not an approval request)
+        const toolActivity: ToolActivityEvent = {
           terminalSessionId,
           sessionKey: processInfo.sessionKey,
-          context,
-          options: ['y:yes', 'n:no', 'p:plan'], // Standard options
-          promptText,
+          toolName,
+          toolId,
+          inputSummary,
         };
 
-        this.emit('claude_approval_request', approvalRequest);
-        console.log(`[Claude Process] Emitted tool_use notification: ${approvalId}, tool: ${toolName}`);
+        this.emit('tool_activity', toolActivity);
       }
     }
   }
@@ -900,30 +797,10 @@ class ClaudeProcessManager extends EventEmitter {
       return;
     }
 
-    // Check if process has exited
-    if (processInfo.process.exitCode !== null) {
-      console.log(`[Claude Process] Process already exited for ${pending.terminalSessionId} (exit code: ${processInfo.process.exitCode}), cannot send approval response`);
-      return;
-    }
-
-    if (!processInfo.process.stdin || processInfo.process.stdin.destroyed) {
-      console.log(`[Claude Process] stdin is closed or destroyed for ${pending.terminalSessionId}, cannot send approval response`);
-      return;
-    }
-
-    // Write the response character to stdin (e.g., 'y', 'n', 'p')
-    const char = response.charAt(0).toLowerCase();
-    console.log(`[Claude Process] Writing response '${char}' to stdin for ${pending.terminalSessionId}`);
-
-    try {
-      processInfo.process.stdin.write(char, (err) => {
-        if (err) {
-          console.error(`[Claude Process] Error writing approval response to stdin for ${pending.terminalSessionId}:`, err.message);
-        }
-      });
-    } catch (err) {
-      console.error(`[Claude Process] Exception writing approval response to stdin for ${pending.terminalSessionId}:`, (err as Error).message);
-    }
+    // SDK mode (stream-json) does not accept raw character input — writing 'y' or 'n'
+    // to stdin would be interpreted as a malformed JSONL message, not an approval response.
+    // The tool has already executed by the time the user sees the notification.
+    console.log(`[Claude Process] Approval response '${response}' for ${approvalId} ignored — SDK mode processes don't accept raw stdin approval characters`);
   }
 
   /**
@@ -1147,5 +1024,6 @@ class ClaudeProcessManager extends EventEmitter {
   }
 }
 
+export { ClaudeProcessManager };
 export const claudeProcessManager = new ClaudeProcessManager();
 export default claudeProcessManager;

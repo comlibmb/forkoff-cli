@@ -198,6 +198,17 @@ Configuration files are stored at:
 
 ---
 
+## Security
+
+Your data stays yours. All communication between the ForkOff CLI and your mobile device is protected with **end-to-end encryption (E2EE)**:
+
+- Messages, code, and commands are encrypted on-device before leaving your machine
+- The ForkOff server never sees your plaintext data — it only relays encrypted payloads
+- Each device pair establishes a unique encrypted channel using ephemeral key exchange
+- Session keys are derived per-connection, so even if one session is compromised, others remain secure
+
+No additional setup required — E2EE is enabled automatically when you pair your device.
+
 ## Requirements
 
 - Node.js 18+

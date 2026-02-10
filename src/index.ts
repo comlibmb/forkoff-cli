@@ -580,7 +580,7 @@ async function startConnection(): Promise<void> {
     wsClient.on('claude_start_session', async (data: any) => {
       console.log(chalk.cyan(`[Claude] Start session request: ${data.directory}`));
       try {
-        const result = await claudeProcessManager.startSession(data.directory, data.terminalSessionId);
+        const result = await claudeProcessManager.startSession(data.directory, data.terminalSessionId, data.dangerouslySkipPermissions);
 
         wsClient.sendToolStatusUpdate('claude_code', 'active');
         wsClient.sendTerminalCwd({ terminalSessionId: data.terminalSessionId, cwd: result.cwd });
@@ -619,7 +619,7 @@ async function startConnection(): Promise<void> {
       resolvedDir = path.resolve(resolvedDir);
 
       // Register session info for later use when message is sent (don't spawn yet)
-      claudeProcessManager.registerSession(data.sessionKey, resolvedDir, data.terminalSessionId);
+      claudeProcessManager.registerSession(data.sessionKey, resolvedDir, data.terminalSessionId, data.dangerouslySkipPermissions);
 
       wsClient.sendToolStatusUpdate('claude_code', 'active');
       wsClient.sendClaudeSessionUpdate({
@@ -976,6 +976,12 @@ async function startConnection(): Promise<void> {
     claudeProcessManager.on('claude_approval_request', (data: any) => {
       console.log(chalk.yellow(`[Claude] Approval request: ${data.approvalId}`));
       wsClient.sendClaudeApprovalRequest(data);
+    });
+
+    // Forward tool activity events to mobile (non-blocking notifications)
+    claudeProcessManager.on('tool_activity', (data: any) => {
+      console.log(chalk.dim(`[Claude] Tool activity: ${data.toolName} - ${data.inputSummary?.substring(0, 60)}`));
+      wsClient.sendToolActivity(data);
     });
 
     // Handle Claude approval responses from mobile

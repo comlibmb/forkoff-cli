@@ -425,6 +425,18 @@ export class WebSocketClient extends EventEmitter {
     this.socket?.emit('claude_approval_request', data);
   }
 
+  // Send tool activity notification to mobile (non-blocking)
+  sendToolActivity(data: {
+    terminalSessionId: string;
+    sessionKey?: string;
+    toolName: string;
+    toolId: string;
+    inputSummary: string;
+  }): void {
+    console.log(`[WS] Sending tool_activity: ${data.toolName} (${data.toolId})`);
+    this.socket?.emit('tool_activity', data);
+  }
+
   // Send thinking content to mobile
   sendThinkingContent(data: {
     sessionKey?: string;
