@@ -1006,6 +1006,24 @@ async function startConnection(): Promise<void> {
 
       // Check if this session is registered (either active or registered for later spawn)
       if (!claudeProcessManager.isClaudeSession(terminalSessionId)) {
+        // Fresh session from auto-prompt (quick action): start new session with directory
+        if (data.directory) {
+          console.log(chalk.cyan(`[Claude] Starting fresh session for auto-prompt in ${data.directory}`));
+          const sent = await claudeProcessManager.startAndSendMessage(data.directory, terminalSessionId, data.message);
+          if (sent) {
+            // Notify mobile that session is ready
+            wsClient.sendClaudeSessionUpdate({
+              sessionKey: terminalSessionId,
+              directory: data.directory,
+              state: 'active',
+              lastUsedAt: new Date().toISOString(),
+            });
+          } else {
+            console.log(chalk.yellow(`[Claude] Failed to start fresh session`));
+          }
+          return;
+        }
+
         console.log(chalk.yellow(`[Claude] Session not registered: ${terminalSessionId}`));
         console.log(chalk.dim(`[Claude] Hint: Mobile should send claude_resume_session first`));
         return;

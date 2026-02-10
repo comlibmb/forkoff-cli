@@ -405,6 +405,64 @@ class ClaudeProcessManager extends EventEmitter {
   }
 
   /**
+   * Start a fresh Claude session and immediately send a message.
+   * Used by auto-prompt quick actions where no prior session exists.
+   * Spawns claude with stream-json flags, writes the JSONL user message to stdin right away.
+   */
+  async startAndSendMessage(directory: string, terminalSessionId: string, message: string): Promise<boolean> {
+    const resolvedDir = this.resolvePath(directory);
+
+    const args = [
+      '--output-format', 'stream-json',
+      '--input-format', 'stream-json',
+      '--verbose',
+    ];
+
+    const proc = spawn('claude', args, {
+      cwd: resolvedDir,
+      env: { ...process.env, TERM: 'xterm-256color' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    this.setupProcessHandlers(terminalSessionId, proc, resolvedDir);
+    this.processes.set(terminalSessionId, {
+      terminalSessionId,
+      process: proc,
+      directory: resolvedDir,
+      outputBuffer: [],
+      wasAutoRestarted: false,
+    });
+
+    // Format as JSONL user message and write immediately
+    const jsonLine = JSON.stringify({
+      type: 'user',
+      message: { role: 'user', content: message.replace(/\n$/, '') },
+    }) + '\n';
+
+    if (!proc.stdin || proc.stdin.destroyed) {
+      console.log(`[Claude Process] stdin not available for startAndSendMessage`);
+      return false;
+    }
+
+    return new Promise((resolve) => {
+      try {
+        proc.stdin!.write(jsonLine, (err) => {
+          if (err) {
+            console.error(`[Claude Process] Error writing initial message:`, err.message);
+            resolve(false);
+          } else {
+            console.log(`[Claude Process] Initial message written to new session in ${resolvedDir}`);
+            resolve(true);
+          }
+        });
+      } catch (err) {
+        console.error(`[Claude Process] Exception writing initial message:`, (err as Error).message);
+        resolve(false);
+      }
+    });
+  }
+
+  /**
    * Check if a session is a Claude session (active or restartable)
    */
   isClaudeSession(terminalSessionId: string): boolean {
@@ -477,6 +535,19 @@ class ClaudeProcessManager extends EventEmitter {
                 console.log(`[Claude Process] Received result message - turn complete. Subtype: ${message.subtype}, Cost: $${message.cost_usd || 'unknown'}`);
                 if (message.is_error) {
                   console.log(`[Claude Process] Result indicates error: ${JSON.stringify(message.error || 'unknown')}`);
+                }
+
+                // Capture session_id from result so future sendInput() can --resume
+                if (message.session_id && processInfo && !processInfo.sessionKey) {
+                  console.log(`[Claude Process] Captured session_id from result: ${message.session_id}`);
+                  processInfo.sessionKey = message.session_id;
+                  this.closedSessions.set(terminalSessionId, {
+                    sessionKey: message.session_id,
+                    directory,
+                    lastExitCode: 0,
+                    lastExitTime: Date.now(),
+                    restartCount: 0,
+                  });
                 }
               }
             }
