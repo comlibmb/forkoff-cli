@@ -630,6 +630,12 @@ async function startConnection(): Promise<void> {
       });
       wsClient.sendTerminalCwd({ terminalSessionId: data.terminalSessionId, cwd: resolvedDir });
 
+      // Notify mobile that the session is ready for input
+      wsClient.sendClaudeSessionEvent({
+        sessionKey: data.sessionKey,
+        event: { type: 'ready' },
+      });
+
       console.log(chalk.green(`[Claude] Session ready (will spawn on first message): ${data.sessionKey}`));
     });
 
