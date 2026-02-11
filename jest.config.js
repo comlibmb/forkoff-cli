@@ -12,4 +12,7 @@ module.exports = {
   transform: {
     '^.+\\.ts$': 'ts-jest',
   },
+  // Permission tests share a global temp directory (os.tmpdir()/forkoff-permissions)
+  // and must run serially to avoid cross-test contamination.
+  maxWorkers: 1,
 };

@@ -990,6 +990,18 @@ async function startConnection(): Promise<void> {
       wsClient.sendToolActivity(data);
     });
 
+    // Forward permission prompts from hook system to mobile (interactive approval)
+    claudeProcessManager.on('permission_prompt', (data: any) => {
+      console.log(chalk.yellow(`[Claude] Permission prompt: ${data.toolName} (${data.promptId})`));
+      wsClient.sendPermissionPrompt(data);
+    });
+
+    // Handle permission responses from mobile → route back to hook IPC
+    wsClient.on('permission_response', (data: any) => {
+      console.log(chalk.green(`[Claude] Permission response: ${data.promptId} -> ${data.decision}`));
+      claudeProcessManager.handlePermissionResponse(data.promptId, data.decision, data.reason);
+    });
+
     // Handle Claude approval responses from mobile
     wsClient.on('claude_approval_response', (data: any) => {
       console.log(chalk.green(`[Claude] Approval response: ${data.approvalId} -> ${data.response}`));
@@ -1015,7 +1027,7 @@ async function startConnection(): Promise<void> {
         // Fresh session from auto-prompt (quick action): start new session with directory
         if (data.directory) {
           console.log(chalk.cyan(`[Claude] Starting fresh session for auto-prompt in ${data.directory}`));
-          const sent = await claudeProcessManager.startAndSendMessage(data.directory, terminalSessionId, data.message);
+          const sent = await claudeProcessManager.startAndSendMessage(data.directory, terminalSessionId, data.message, data.mode?.permissionMode === 'bypassPermissions');
           if (sent) {
             // Notify mobile that session is ready
             wsClient.sendClaudeSessionUpdate({

@@ -8,6 +8,8 @@ import { ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
 import * as os from 'os';
 import * as path from 'path';
+import * as fs from 'fs';
+import { PermissionIpcManager, PermissionPromptEvent } from './permission-ipc';
 
 interface ClaudeProcessInfo {
   terminalSessionId: string;
@@ -191,6 +193,7 @@ interface ClaudeProcessManagerEvents {
   sdk_message: [event: SdkMessageEvent];
   claude_approval_request: [request: ClaudeApprovalRequest];
   tool_activity: [event: ToolActivityEvent];
+  permission_prompt: [event: PermissionPromptEvent];
   thinking_content: [event: ThinkingContentEvent];
   token_usage: [event: TokenUsageEvent];
   task_progress: [event: TaskProgressEvent];
@@ -224,6 +227,10 @@ class ClaudeProcessManager extends EventEmitter {
   private closedSessions: Map<string, SessionRestartInfo> = new Map();
   /** Maximum number of auto-restarts per session to prevent chaos */
   private readonly MAX_AUTO_RESTARTS: number = 3;
+  /** Permission IPC managers per session */
+  private permissionIpcManagers: Map<string, PermissionIpcManager> = new Map();
+  /** Track directories where we've configured hooks */
+  private hookConfiguredDirs: Set<string> = new Set();
 
   /** Type-safe emit for known events */
   public override emit<K extends keyof ClaudeProcessManagerEvents>(
@@ -254,9 +261,15 @@ class ClaudeProcessManager extends EventEmitter {
       '--verbose',                      // Complete messages
     ];
 
-    // Add unrestricted mode flag when enabled from mobile
+    // When unrestricted mode is enabled, use --dangerouslySkipPermissions for full access
+    // Otherwise configure interactive approval hooks and use default permission mode
     if (dangerouslySkipPermissions) {
       args.push('--dangerouslySkipPermissions');
+    } else {
+      // Configure PreToolUse hook for interactive approvals
+      this.configureHook(resolvedDir);
+      // Start IPC manager to bridge hook ↔ WebSocket
+      this.startPermissionIpc(terminalSessionId);
     }
 
     // SECURITY: Using cross-spawn instead of shell: true to prevent command injection
@@ -287,11 +300,14 @@ class ClaudeProcessManager extends EventEmitter {
     ];
 
     // When unrestricted mode is enabled, use --dangerouslySkipPermissions for full access
-    // Otherwise fall back to --permission-mode acceptEdits for auto-approving file edits
+    // Otherwise configure interactive approval hooks and use default permission mode
     if (dangerouslySkipPermissions) {
       args.push('--dangerouslySkipPermissions');
     } else {
-      args.push('--permission-mode', 'acceptEdits');
+      // Configure PreToolUse hook for interactive approvals
+      this.configureHook(resolvedDir);
+      // Start IPC manager to bridge hook ↔ WebSocket
+      this.startPermissionIpc(terminalSessionId, sessionKey);
     }
 
     console.log(`[Claude Process] Spawning: claude ${args.join(' ')}`);
@@ -409,7 +425,7 @@ class ClaudeProcessManager extends EventEmitter {
    * Used by auto-prompt quick actions where no prior session exists.
    * Spawns claude with stream-json flags, writes the JSONL user message to stdin right away.
    */
-  async startAndSendMessage(directory: string, terminalSessionId: string, message: string): Promise<boolean> {
+  async startAndSendMessage(directory: string, terminalSessionId: string, message: string, dangerouslySkipPermissions?: boolean): Promise<boolean> {
     const resolvedDir = this.resolvePath(directory);
 
     const args = [
@@ -417,6 +433,15 @@ class ClaudeProcessManager extends EventEmitter {
       '--input-format', 'stream-json',
       '--verbose',
     ];
+
+    // When unrestricted mode is enabled, use --dangerouslySkipPermissions
+    // Otherwise configure interactive approval hooks
+    if (dangerouslySkipPermissions) {
+      args.push('--dangerouslySkipPermissions');
+    } else {
+      this.configureHook(resolvedDir);
+      this.startPermissionIpc(terminalSessionId);
+    }
 
     const proc = spawn('claude', args, {
       cwd: resolvedDir,
@@ -632,6 +657,16 @@ class ClaudeProcessManager extends EventEmitter {
       };
       this.emit('session_ended', endedEvent);
 
+      // Clean up permission IPC for this session
+      this.stopPermissionIpc(terminalSessionId);
+
+      // Remove hook config if no other sessions are using this directory
+      const otherSessionsInDir = Array.from(this.processes.values())
+        .filter(p => p.directory === directory && p.terminalSessionId !== terminalSessionId);
+      if (otherSessionsInDir.length === 0) {
+        this.removeHook(directory);
+      }
+
       // Clean up
       this.processes.delete(terminalSessionId);
     });
@@ -721,6 +756,141 @@ class ClaudeProcessManager extends EventEmitter {
     if (info) {
       info.restartCount = 0;
       console.log(`[Claude Process] Restart counter cleared for ${terminalSessionId}`);
+    }
+  }
+
+  /**
+   * Configure the PreToolUse hook in the project's .claude/settings.local.json.
+   * This tells Claude Code to run our hook script before each tool use.
+   */
+  private configureHook(cwd: string): void {
+    const hookScriptPath = path.resolve(__dirname, 'permission-hook.js');
+
+    // Verify hook script exists (it should be compiled alongside this file)
+    if (!fs.existsSync(hookScriptPath)) {
+      console.log(`[Claude Process] Hook script not found at ${hookScriptPath}, skipping hook configuration`);
+      return;
+    }
+
+    const claudeDir = path.join(cwd, '.claude');
+    const settingsFile = path.join(claudeDir, 'settings.local.json');
+
+    try {
+      // Create .claude dir if needed
+      fs.mkdirSync(claudeDir, { recursive: true });
+
+      // Read existing settings or start fresh
+      let settings: any = {};
+      if (fs.existsSync(settingsFile)) {
+        try {
+          settings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
+        } catch {
+          settings = {};
+        }
+      }
+
+      // Add our hook
+      if (!settings.hooks) settings.hooks = {};
+      if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = [];
+
+      // Check if our hook is already configured
+      const hookCommand = `node "${hookScriptPath}"`;
+      const alreadyConfigured = settings.hooks.PreToolUse.some(
+        (h: any) => h.hooks?.some((hook: any) => hook.command?.includes('permission-hook'))
+      );
+
+      if (!alreadyConfigured) {
+        settings.hooks.PreToolUse.push({
+          matcher: '',
+          hooks: [{
+            type: 'command',
+            command: hookCommand,
+          }],
+        });
+      }
+
+      fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2), 'utf-8');
+      this.hookConfiguredDirs.add(cwd);
+      console.log(`[Claude Process] Hook configured in ${settingsFile}`);
+    } catch (err) {
+      console.log(`[Claude Process] Failed to configure hook: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Remove our hook from the project's .claude/settings.local.json.
+   */
+  private removeHook(cwd: string): void {
+    if (!this.hookConfiguredDirs.has(cwd)) return;
+
+    const settingsFile = path.join(cwd, '.claude', 'settings.local.json');
+    if (!fs.existsSync(settingsFile)) return;
+
+    try {
+      const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
+      if (!settings.hooks?.PreToolUse) return;
+
+      // Remove our hook entries
+      settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(
+        (h: any) => !h.hooks?.some((hook: any) => hook.command?.includes('permission-hook'))
+      );
+
+      // Clean up empty arrays
+      if (settings.hooks.PreToolUse.length === 0) delete settings.hooks.PreToolUse;
+      if (settings.hooks && Object.keys(settings.hooks).length === 0) delete settings.hooks;
+
+      // Write back or delete if empty
+      if (Object.keys(settings).length === 0) {
+        fs.unlinkSync(settingsFile);
+      } else {
+        fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2), 'utf-8');
+      }
+
+      this.hookConfiguredDirs.delete(cwd);
+      console.log(`[Claude Process] Hook removed from ${settingsFile}`);
+    } catch (err) {
+      console.log(`[Claude Process] Failed to remove hook: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Start the permission IPC manager for a session.
+   * Listens for hook permission requests and forwards them as events.
+   */
+  private startPermissionIpc(terminalSessionId: string, sessionKey?: string): void {
+    // Stop any existing IPC manager for this session
+    this.stopPermissionIpc(terminalSessionId);
+
+    const ipcManager = new PermissionIpcManager();
+
+    // Forward permission_prompt events from IPC manager
+    ipcManager.on('permission_prompt', (event: PermissionPromptEvent) => {
+      this.emit('permission_prompt', event);
+    });
+
+    ipcManager.start(terminalSessionId, sessionKey);
+    this.permissionIpcManagers.set(terminalSessionId, ipcManager);
+    console.log(`[Claude Process] Permission IPC started for ${terminalSessionId}`);
+  }
+
+  /**
+   * Stop the permission IPC manager for a session.
+   */
+  private stopPermissionIpc(terminalSessionId: string): void {
+    const existing = this.permissionIpcManagers.get(terminalSessionId);
+    if (existing) {
+      existing.cleanup();
+      this.permissionIpcManagers.delete(terminalSessionId);
+    }
+  }
+
+  /**
+   * Handle a permission response from mobile for a specific prompt.
+   */
+  handlePermissionResponse(promptId: string, decision: 'allow' | 'deny', reason?: string): void {
+    // Find the IPC manager that has this prompt
+    for (const [, ipcManager] of this.permissionIpcManagers) {
+      ipcManager.handleResponse(promptId, decision, reason);
     }
   }
 

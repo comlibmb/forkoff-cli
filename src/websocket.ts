@@ -275,6 +275,12 @@ export class WebSocketClient extends EventEmitter {
         console.log(`[WS] Received claude_approval_response: ${data.approvalId}, response: ${data.response}`);
         this.emit('claude_approval_response', data);
       });
+
+      // Listen for permission responses from mobile (hook-based approval system)
+      this.socket.on('permission_response', (data: { promptId: string; decision: 'allow' | 'deny'; reason?: string }) => {
+        console.log(`[WS] Received permission_response: ${data.promptId} -> ${data.decision}`);
+        this.emit('permission_response', data);
+      });
     });
   }
 
@@ -435,6 +441,19 @@ export class WebSocketClient extends EventEmitter {
   }): void {
     console.log(`[WS] Sending tool_activity: ${data.toolName} (${data.toolId})`);
     this.socket?.emit('tool_activity', data);
+  }
+
+  // Send permission prompt to mobile (interactive approval from hook system)
+  sendPermissionPrompt(data: {
+    promptId: string;
+    terminalSessionId: string;
+    sessionKey?: string;
+    toolName: string;
+    toolInput: any;
+    toolUseId: string;
+  }): void {
+    console.log(`[WS] Sending permission_prompt: ${data.toolName} (${data.promptId})`);
+    this.socket?.emit('permission_prompt', data);
   }
 
   // Send thinking content to mobile

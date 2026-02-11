@@ -11,6 +11,25 @@ import { EventEmitter } from 'events';
 const mockSpawn = jest.fn();
 jest.mock('cross-spawn', () => mockSpawn);
 
+// Mock fs to prevent hook config from writing real files
+jest.mock('fs', () => {
+  const actual = jest.requireActual('fs');
+  return {
+    ...actual,
+    existsSync: jest.fn((p: string) => {
+      // Hook script doesn't exist in test env — skip hook config
+      if (typeof p === 'string' && p.includes('permission-hook')) return false;
+      return actual.existsSync(p);
+    }),
+    mkdirSync: jest.fn(),
+    writeFileSync: jest.fn(),
+    readFileSync: jest.fn((p: string, enc?: string) => {
+      if (typeof p === 'string' && p.includes('settings.local.json')) return '{}';
+      return actual.readFileSync(p, enc);
+    }),
+  };
+});
+
 // Create a mock child process
 function createMockProcess() {
   const stdin = {
@@ -73,22 +92,21 @@ describe('ClaudeProcessManager', () => {
     });
 
     describe('resumeSession', () => {
-      it('should use --permission-mode acceptEdits when flag is false', async () => {
+      it('should NOT include --dangerouslySkipPermissions when flag is false (uses hooks instead)', async () => {
         await manager.resumeSession('key-1', '/test/dir', 'session-1', false);
 
         const args = mockSpawn.mock.calls[0][1];
-        expect(args).toContain('--permission-mode');
-        expect(args).toContain('acceptEdits');
         expect(args).not.toContain('--dangerouslySkipPermissions');
+        // No longer uses --permission-mode; interactive hooks handle permissions
+        expect(args).not.toContain('--permission-mode');
       });
 
-      it('should use --dangerouslySkipPermissions instead of --permission-mode when flag is true', async () => {
+      it('should use --dangerouslySkipPermissions when flag is true', async () => {
         await manager.resumeSession('key-1', '/test/dir', 'session-1', true);
 
         const args = mockSpawn.mock.calls[0][1];
         expect(args).toContain('--dangerouslySkipPermissions');
         expect(args).not.toContain('--permission-mode');
-        expect(args).not.toContain('acceptEdits');
       });
     });
 
