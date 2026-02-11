@@ -8,7 +8,7 @@ import { api } from './api';
 import { wsClient } from './websocket';
 import { terminalManager } from './terminal';
 import { approvalManager } from './approval';
-import { toolDetector, claudeHooksManager, claudeSessionDetector, claudeProcessManager } from './tools';
+import { toolDetector, claudeHooksManager, claudeSessionDetector, claudeProcessManager, PermissionIpcManager } from './tools';
 import { transcriptStreamer } from './transcript-streamer';
 import { setQuiet, createSpinner } from './logger';
 import { enableStartup, disableStartup, isStartupRegistered, getBinaryPath } from './startup';
@@ -409,6 +409,7 @@ async function startConnection(): Promise<void> {
 
   try {
     await wsClient.connect();
+    PermissionIpcManager.cleanupStaleTempFiles();
     spinner.succeed('Connected to ForkOff!\n');
 
     // Detect and report connected tools
@@ -580,7 +581,7 @@ async function startConnection(): Promise<void> {
     wsClient.on('claude_start_session', async (data: any) => {
       console.log(chalk.cyan(`[Claude] Start session request: ${data.directory}`));
       try {
-        const result = await claudeProcessManager.startSession(data.directory, data.terminalSessionId, data.dangerouslySkipPermissions);
+        const result = await claudeProcessManager.startSession(data.directory, data.terminalSessionId, data.dangerouslySkipPermissions, data.interactivePermissions);
 
         wsClient.sendToolStatusUpdate('claude_code', 'active');
         wsClient.sendTerminalCwd({ terminalSessionId: data.terminalSessionId, cwd: result.cwd });
@@ -618,8 +619,11 @@ async function startConnection(): Promise<void> {
       }
       resolvedDir = path.resolve(resolvedDir);
 
-      // Register session info for later use when message is sent (don't spawn yet)
-      claudeProcessManager.registerSession(data.sessionKey, resolvedDir, data.terminalSessionId, data.dangerouslySkipPermissions);
+      // Always register the session — even if it's running in a terminal.
+      // With --resume, we spawn a new process per turn which picks up where the session left off.
+      // If the terminal session holds a file lock, the spawn will fail gracefully.
+      claudeProcessManager.registerSession(data.sessionKey, resolvedDir, data.terminalSessionId, data.dangerouslySkipPermissions, data.interactivePermissions);
+      claudeProcessManager.markTakenOver(data.terminalSessionId);
 
       wsClient.sendToolStatusUpdate('claude_code', 'active');
       wsClient.sendClaudeSessionUpdate({
@@ -991,7 +995,13 @@ async function startConnection(): Promise<void> {
     });
 
     // Forward permission prompts from hook system to mobile (interactive approval)
+    // Only forward if the session is taken over; otherwise auto-allow so Claude doesn't hang
     claudeProcessManager.on('permission_prompt', (data: any) => {
+      if (!claudeProcessManager.isTakenOver(data.terminalSessionId)) {
+        console.log(chalk.dim(`[Claude] Permission prompt auto-allowed (watch-only): ${data.toolName} (${data.promptId})`));
+        claudeProcessManager.handlePermissionResponse(data.promptId, 'allow', 'Auto-allowed: session not taken over');
+        return;
+      }
       console.log(chalk.yellow(`[Claude] Permission prompt: ${data.toolName} (${data.promptId})`));
       wsClient.sendPermissionPrompt(data);
     });
@@ -1000,6 +1010,14 @@ async function startConnection(): Promise<void> {
     wsClient.on('permission_response', (data: any) => {
       console.log(chalk.green(`[Claude] Permission response: ${data.promptId} -> ${data.decision}`));
       claudeProcessManager.handlePermissionResponse(data.promptId, data.decision, data.reason);
+    });
+
+    // Handle mobile disconnect — full reset: clear taken-over, auto-allow pending, tear down hooks
+    wsClient.on('mobile_disconnected', () => {
+      console.log(chalk.yellow(`[Claude] Mobile disconnected — full permission reset`));
+      claudeProcessManager.clearAllTakenOver();
+      claudeProcessManager.autoAllowAllPendingPrompts();
+      claudeProcessManager.cleanupAllPermissionState();
     });
 
     // Handle Claude approval responses from mobile
@@ -1022,12 +1040,12 @@ async function startConnection(): Promise<void> {
         return;
       }
 
-      // Check if this session is registered (either active or registered for later spawn)
-      if (!claudeProcessManager.isClaudeSession(terminalSessionId)) {
+      // Check if this session has been taken over by the mobile user
+      if (!claudeProcessManager.isTakenOver(terminalSessionId)) {
         // Fresh session from auto-prompt (quick action): start new session with directory
         if (data.directory) {
           console.log(chalk.cyan(`[Claude] Starting fresh session for auto-prompt in ${data.directory}`));
-          const sent = await claudeProcessManager.startAndSendMessage(data.directory, terminalSessionId, data.message, data.mode?.permissionMode === 'bypassPermissions');
+          const sent = await claudeProcessManager.startAndSendMessage(data.directory, terminalSessionId, data.message, data.mode?.permissionMode === 'bypassPermissions', data.interactivePermissions);
           if (sent) {
             // Notify mobile that session is ready
             wsClient.sendClaudeSessionUpdate({
@@ -1042,8 +1060,15 @@ async function startConnection(): Promise<void> {
           return;
         }
 
-        console.log(chalk.yellow(`[Claude] Session not registered: ${terminalSessionId}`));
-        console.log(chalk.dim(`[Claude] Hint: Mobile should send claude_resume_session first`));
+        // Session not taken over — user must press "Take Over" first
+        console.log(chalk.yellow(`[Claude] Session not taken over: ${terminalSessionId} — watch-only mode`));
+        wsClient.sendClaudeSessionEvent({
+          sessionKey: terminalSessionId,
+          event: {
+            type: 'error',
+            message: 'You must take over this session before sending messages.',
+          },
+        });
         return;
       }
 

@@ -19,6 +19,7 @@ interface ClaudeProcessInfo {
   outputBuffer: string[]; // Recent output lines for context
   wasAutoRestarted?: boolean; // Track if this was an auto-restart
   dangerouslySkipPermissions?: boolean; // Unrestricted mode from mobile
+  interactivePermissions?: boolean; // Mobile user opted into hook-based approval
 }
 
 /**
@@ -207,6 +208,7 @@ interface SessionRestartInfo {
   lastExitTime: number;
   restartCount: number;
   dangerouslySkipPermissions?: boolean;
+  interactivePermissions?: boolean;
 }
 
 /** Tool activity event — non-blocking notification of tool execution */
@@ -229,8 +231,12 @@ class ClaudeProcessManager extends EventEmitter {
   private readonly MAX_AUTO_RESTARTS: number = 3;
   /** Permission IPC managers per session */
   private permissionIpcManagers: Map<string, PermissionIpcManager> = new Map();
+  /** Track which process started each IPC manager (to avoid race conditions on close) */
+  private ipcOwnerProcess: Map<string, ChildProcess> = new Map();
   /** Track directories where we've configured hooks */
   private hookConfiguredDirs: Set<string> = new Set();
+  /** Track sessions that mobile has explicitly taken over (via claude_resume_session) */
+  private takenOverSessions: Set<string> = new Set();
 
   /** Type-safe emit for known events */
   public override emit<K extends keyof ClaudeProcessManagerEvents>(
@@ -251,7 +257,7 @@ class ClaudeProcessManager extends EventEmitter {
   /**
    * Start a new Claude session in the specified directory
    */
-  async startSession(directory: string, terminalSessionId: string, dangerouslySkipPermissions?: boolean): Promise<{ cwd: string }> {
+  async startSession(directory: string, terminalSessionId: string, dangerouslySkipPermissions?: boolean, interactivePermissions?: boolean): Promise<{ cwd: string }> {
     const resolvedDir = this.resolvePath(directory);
 
     // SDK flags for structured JSON communication
@@ -261,11 +267,13 @@ class ClaudeProcessManager extends EventEmitter {
       '--verbose',                      // Complete messages
     ];
 
-    // When unrestricted mode is enabled, use --dangerously-skip-permissions for full access
-    // Otherwise configure interactive approval hooks and use default permission mode
+    // Permission modes (in priority order):
+    // 1. dangerouslySkipPermissions → --dangerously-skip-permissions (full unrestricted access)
+    // 2. interactivePermissions → configure hooks for mobile approval (opt-in)
+    // 3. default → no hooks, Claude uses its own local permission mode
     if (dangerouslySkipPermissions) {
       args.push('--dangerously-skip-permissions');
-    } else {
+    } else if (interactivePermissions) {
       // Configure PreToolUse hook for interactive approvals
       this.configureHook(resolvedDir);
       // Start IPC manager to bridge hook ↔ WebSocket
@@ -280,7 +288,7 @@ class ClaudeProcessManager extends EventEmitter {
     });
 
     this.setupProcessHandlers(terminalSessionId, proc, resolvedDir);
-    this.processes.set(terminalSessionId, { terminalSessionId, process: proc, directory: resolvedDir, outputBuffer: [], wasAutoRestarted: false, dangerouslySkipPermissions: !!dangerouslySkipPermissions });
+    this.processes.set(terminalSessionId, { terminalSessionId, process: proc, directory: resolvedDir, outputBuffer: [], wasAutoRestarted: false, dangerouslySkipPermissions: !!dangerouslySkipPermissions, interactivePermissions: !!interactivePermissions });
 
     return { cwd: resolvedDir };
   }
@@ -288,7 +296,7 @@ class ClaudeProcessManager extends EventEmitter {
   /**
    * Resume an existing Claude session
    */
-  async resumeSession(sessionKey: string, directory: string, terminalSessionId: string, dangerouslySkipPermissions?: boolean): Promise<{ cwd: string }> {
+  async resumeSession(sessionKey: string, directory: string, terminalSessionId: string, dangerouslySkipPermissions?: boolean, interactivePermissions?: boolean): Promise<{ cwd: string }> {
     const resolvedDir = this.resolvePath(directory);
 
     // SDK flags for structured JSON communication
@@ -299,11 +307,13 @@ class ClaudeProcessManager extends EventEmitter {
       '--verbose',                      // Complete messages
     ];
 
-    // When unrestricted mode is enabled, use --dangerously-skip-permissions for full access
-    // Otherwise configure interactive approval hooks and use default permission mode
+    // Permission modes (in priority order):
+    // 1. dangerouslySkipPermissions → --dangerously-skip-permissions (full unrestricted access)
+    // 2. interactivePermissions → configure hooks for mobile approval (opt-in)
+    // 3. default → no hooks, Claude uses its own local permission mode
     if (dangerouslySkipPermissions) {
       args.push('--dangerously-skip-permissions');
-    } else {
+    } else if (interactivePermissions) {
       // Configure PreToolUse hook for interactive approvals
       this.configureHook(resolvedDir);
       // Start IPC manager to bridge hook ↔ WebSocket
@@ -320,7 +330,7 @@ class ClaudeProcessManager extends EventEmitter {
     });
 
     this.setupProcessHandlers(terminalSessionId, proc, resolvedDir, sessionKey);
-    this.processes.set(terminalSessionId, { terminalSessionId, process: proc, directory: resolvedDir, sessionKey, outputBuffer: [], wasAutoRestarted: false, dangerouslySkipPermissions: !!dangerouslySkipPermissions });
+    this.processes.set(terminalSessionId, { terminalSessionId, process: proc, directory: resolvedDir, sessionKey, outputBuffer: [], wasAutoRestarted: false, dangerouslySkipPermissions: !!dangerouslySkipPermissions, interactivePermissions: !!interactivePermissions });
 
     // Store session info for future message sends (needed since we spawn fresh process per message)
     this.closedSessions.set(terminalSessionId, {
@@ -330,6 +340,7 @@ class ClaudeProcessManager extends EventEmitter {
       lastExitTime: Date.now(),
       restartCount: 0,
       dangerouslySkipPermissions: !!dangerouslySkipPermissions,
+      interactivePermissions: !!interactivePermissions,
     });
 
     return { cwd: resolvedDir };
@@ -382,7 +393,7 @@ class ClaudeProcessManager extends EventEmitter {
     const jsonLine = JSON.stringify(message) + '\n';
 
     try {
-      await this.resumeSession(sessionKey, directory, terminalSessionId, restartInfo?.dangerouslySkipPermissions);
+      await this.resumeSession(sessionKey, directory, terminalSessionId, restartInfo?.dangerouslySkipPermissions, restartInfo?.interactivePermissions);
       info = this.processes.get(terminalSessionId);
     } catch (err) {
       console.error(`[Claude Process] Failed to spawn process:`, (err as Error).message);
@@ -425,7 +436,7 @@ class ClaudeProcessManager extends EventEmitter {
    * Used by auto-prompt quick actions where no prior session exists.
    * Spawns claude with stream-json flags, writes the JSONL user message to stdin right away.
    */
-  async startAndSendMessage(directory: string, terminalSessionId: string, message: string, dangerouslySkipPermissions?: boolean): Promise<boolean> {
+  async startAndSendMessage(directory: string, terminalSessionId: string, message: string, dangerouslySkipPermissions?: boolean, interactivePermissions?: boolean): Promise<boolean> {
     const resolvedDir = this.resolvePath(directory);
 
     const args = [
@@ -434,11 +445,10 @@ class ClaudeProcessManager extends EventEmitter {
       '--verbose',
     ];
 
-    // When unrestricted mode is enabled, use --dangerously-skip-permissions
-    // Otherwise configure interactive approval hooks
+    // Permission modes (same priority as startSession/resumeSession)
     if (dangerouslySkipPermissions) {
       args.push('--dangerously-skip-permissions');
-    } else {
+    } else if (interactivePermissions) {
       this.configureHook(resolvedDir);
       this.startPermissionIpc(terminalSessionId);
     }
@@ -456,6 +466,8 @@ class ClaudeProcessManager extends EventEmitter {
       directory: resolvedDir,
       outputBuffer: [],
       wasAutoRestarted: false,
+      dangerouslySkipPermissions: !!dangerouslySkipPermissions,
+      interactivePermissions: !!interactivePermissions,
     });
 
     // Format as JSONL user message and write immediately
@@ -495,11 +507,19 @@ class ClaudeProcessManager extends EventEmitter {
   }
 
   /**
+   * Check if CLI has a running process for this session (not just registered)
+   */
+  hasRunningProcess(terminalSessionId: string): boolean {
+    const info = this.processes.get(terminalSessionId);
+    return !!(info?.process && info.process.exitCode === null);
+  }
+
+  /**
    * Register session info without spawning a process.
    * Used when mobile opens a session view - we store the info so we can spawn later on first message.
    */
-  registerSession(sessionKey: string, directory: string, terminalSessionId: string, dangerouslySkipPermissions?: boolean): void {
-    console.log(`[Claude Process] Registering session: ${sessionKey} in ${directory}${dangerouslySkipPermissions ? ' (unrestricted)' : ''}`);
+  registerSession(sessionKey: string, directory: string, terminalSessionId: string, dangerouslySkipPermissions?: boolean, interactivePermissions?: boolean): void {
+    console.log(`[Claude Process] Registering session: ${sessionKey} in ${directory}${dangerouslySkipPermissions ? ' (unrestricted)' : ''}${interactivePermissions ? ' (interactive)' : ''}`);
     this.closedSessions.set(terminalSessionId, {
       sessionKey,
       directory,
@@ -507,6 +527,7 @@ class ClaudeProcessManager extends EventEmitter {
       lastExitTime: Date.now(),
       restartCount: 0,
       dangerouslySkipPermissions,
+      interactivePermissions,
     });
   }
 
@@ -572,6 +593,8 @@ class ClaudeProcessManager extends EventEmitter {
                     lastExitCode: 0,
                     lastExitTime: Date.now(),
                     restartCount: 0,
+                    dangerouslySkipPermissions: processInfo.dangerouslySkipPermissions,
+                    interactivePermissions: processInfo.interactivePermissions,
                   });
                 }
               }
@@ -637,6 +660,7 @@ class ClaudeProcessManager extends EventEmitter {
         lastExitTime: Date.now(),
         restartCount,
         dangerouslySkipPermissions: processInfo?.dangerouslySkipPermissions,
+        interactivePermissions: processInfo?.interactivePermissions,
       });
 
       // Emit exit event
@@ -757,6 +781,76 @@ class ClaudeProcessManager extends EventEmitter {
       info.restartCount = 0;
       console.log(`[Claude Process] Restart counter cleared for ${terminalSessionId}`);
     }
+  }
+
+  /**
+   * Mark a session as taken over by the mobile user.
+   */
+  markTakenOver(terminalSessionId: string): void {
+    this.takenOverSessions.add(terminalSessionId);
+    console.log(`[Claude Process] Session marked as taken over: ${terminalSessionId}`);
+  }
+
+  /**
+   * Check if a session has been taken over by the mobile user.
+   */
+  isTakenOver(terminalSessionId: string): boolean {
+    return this.takenOverSessions.has(terminalSessionId);
+  }
+
+  /**
+   * Clear taken-over state for a single session.
+   */
+  clearTakenOver(terminalSessionId: string): void {
+    this.takenOverSessions.delete(terminalSessionId);
+  }
+
+  /**
+   * Clear all taken-over sessions (e.g., when mobile disconnects).
+   */
+  clearAllTakenOver(): void {
+    this.takenOverSessions.clear();
+    console.log(`[Claude Process] All taken-over sessions cleared`);
+  }
+
+  /**
+   * Auto-allow all pending permission prompts across all IPC managers.
+   * Called when mobile disconnects so Claude doesn't hang waiting for approval.
+   */
+  autoAllowAllPendingPrompts(): void {
+    let count = 0;
+    for (const [, ipcManager] of this.permissionIpcManagers) {
+      const pending = (ipcManager as any).pendingPrompts as Map<string, any>;
+      if (pending) {
+        for (const promptId of Array.from(pending.keys())) {
+          ipcManager.handleResponse(promptId, 'allow', 'Auto-allowed: mobile disconnected');
+          count++;
+        }
+      }
+    }
+    if (count > 0) {
+      console.log(`[Claude Process] Auto-allowed ${count} pending permission prompt(s) on mobile disconnect`);
+    }
+  }
+
+  /**
+   * Tear down all permission hooks and IPC managers.
+   * Called when mobile disconnects — hooks get re-configured on next Take Over + message.
+   */
+  cleanupAllPermissionState(): void {
+    // Stop all IPC managers
+    for (const [sessionId, ipcManager] of this.permissionIpcManagers) {
+      ipcManager.cleanup();
+      console.log(`[Claude Process] Stopped permission IPC for ${sessionId}`);
+    }
+    this.permissionIpcManagers.clear();
+
+    // Remove hooks from all configured directories
+    for (const dir of Array.from(this.hookConfiguredDirs)) {
+      this.removeHook(dir);
+    }
+
+    console.log(`[Claude Process] All permission hooks and IPC managers cleaned up`);
   }
 
   /**

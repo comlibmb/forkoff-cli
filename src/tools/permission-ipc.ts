@@ -260,6 +260,38 @@ class PermissionIpcManager extends EventEmitter {
       console.log(`[Permission IPC] Temp dir cleanup skipped: ${(err as Error).message}`);
     }
   }
+  /**
+   * Remove all regular files from the forkoff-permissions temp directory.
+   * Call on startup to clean up files left behind by a crashed CLI process.
+   */
+  static cleanupStaleTempFiles(): void {
+    const tempDir = path.join(os.tmpdir(), 'forkoff-permissions');
+    let files: string[];
+    try {
+      files = fs.readdirSync(tempDir);
+    } catch {
+      // Directory doesn't exist — nothing to clean
+      return;
+    }
+
+    let cleaned = 0;
+    for (const file of files) {
+      const filePath = path.join(tempDir, file);
+      try {
+        const stat = fs.statSync(filePath);
+        if (stat.isFile()) {
+          fs.unlinkSync(filePath);
+          cleaned++;
+        }
+      } catch {
+        // File may have been removed concurrently — ignore
+      }
+    }
+
+    if (cleaned > 0) {
+      console.log(`[Permission IPC] Cleaned up ${cleaned} stale temp file(s) on startup`);
+    }
+  }
 }
 
 export { PermissionIpcManager, PermissionPromptEvent, PendingPromptInfo };

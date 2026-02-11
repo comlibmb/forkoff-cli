@@ -161,12 +161,25 @@ export class WebSocketClient extends EventEmitter {
         reconnectionDelayMax: 5000,
       });
 
+      // DEBUG: Log ALL incoming events to diagnose routing issues
+      this.socket.onAny((eventName: string, ...args: any[]) => {
+        if (eventName !== 'pong' && eventName !== 'ping') {
+          console.log(`[WS-DEBUG] Event received: ${eventName}, args: ${JSON.stringify(args).substring(0, 200)}`);
+        }
+      });
+
       this.socket.on('connect', () => {
         this.reconnectAttempts = 0;
         console.log(`[WS] Connected with deviceId: ${deviceId}, sessionId: ${sessionId}`);
         this.emit('connected');
         this.startHeartbeat();
         resolve();
+      });
+
+      // DEBUG: Log ALL incoming events
+      this.socket.onAny((eventName: string, ...args: any[]) => {
+        if (eventName === 'device_heartbeat_ack') return; // Skip heartbeat acks
+        console.log(`[WS-DEBUG] Event received: ${eventName}`, JSON.stringify(args).substring(0, 200));
       });
 
       this.socket.on('disconnect', (reason) => {
@@ -280,6 +293,12 @@ export class WebSocketClient extends EventEmitter {
       this.socket.on('permission_response', (data: { promptId: string; decision: 'allow' | 'deny'; reason?: string }) => {
         console.log(`[WS] Received permission_response: ${data.promptId} -> ${data.decision}`);
         this.emit('permission_response', data);
+      });
+
+      // Listen for mobile disconnect notification from backend
+      this.socket.on('mobile_disconnected', (data: { userId: string; timestamp: string }) => {
+        console.log(`[WS] Received mobile_disconnected for user ${data.userId}`);
+        this.emit('mobile_disconnected', data);
       });
     });
   }

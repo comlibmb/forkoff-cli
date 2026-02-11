@@ -133,7 +133,8 @@ describe('ClaudeProcessManager', () => {
           'key-1',
           expect.any(String),
           'session-1',
-          true
+          true,
+          undefined
         );
       });
 
@@ -148,7 +149,24 @@ describe('ClaudeProcessManager', () => {
           'key-1',
           expect.any(String),
           'session-1',
+          undefined,
           undefined
+        );
+      });
+
+      it('should pass interactivePermissions=true to resumeSession when respawning', async () => {
+        manager.registerSession('key-1', '/test/dir', 'session-1', false, true);
+
+        const resumeSpy = jest.spyOn(manager, 'resumeSession');
+
+        await manager.sendInput('session-1', 'hello');
+
+        expect(resumeSpy).toHaveBeenCalledWith(
+          'key-1',
+          expect.any(String),
+          'session-1',
+          false,
+          true
         );
       });
     });
@@ -302,6 +320,94 @@ describe('ClaudeProcessManager', () => {
           (call: any[]) => call[0] === 'y'
         );
         expect(writeCall).toBeUndefined();
+      });
+    });
+  });
+
+  // ==================== Fix: takenOverSessions tracking ====================
+
+  describe('takenOverSessions tracking', () => {
+    describe('markTakenOver / isTakenOver', () => {
+      it('should return false for unknown sessions', () => {
+        expect(manager.isTakenOver('unknown-session')).toBe(false);
+      });
+
+      it('should return true after markTakenOver', () => {
+        manager.markTakenOver('session-taken');
+        expect(manager.isTakenOver('session-taken')).toBe(true);
+      });
+
+      it('should track multiple sessions independently', () => {
+        manager.markTakenOver('session-a');
+        manager.markTakenOver('session-b');
+
+        expect(manager.isTakenOver('session-a')).toBe(true);
+        expect(manager.isTakenOver('session-b')).toBe(true);
+        expect(manager.isTakenOver('session-c')).toBe(false);
+      });
+    });
+
+    describe('clearTakenOver', () => {
+      it('should clear a single session', () => {
+        manager.markTakenOver('session-x');
+        manager.markTakenOver('session-y');
+
+        manager.clearTakenOver('session-x');
+
+        expect(manager.isTakenOver('session-x')).toBe(false);
+        expect(manager.isTakenOver('session-y')).toBe(true);
+      });
+
+      it('should be safe on non-existent session', () => {
+        expect(() => manager.clearTakenOver('nonexistent')).not.toThrow();
+      });
+    });
+
+    describe('clearAllTakenOver', () => {
+      it('should clear all sessions', () => {
+        manager.markTakenOver('session-1');
+        manager.markTakenOver('session-2');
+        manager.markTakenOver('session-3');
+
+        manager.clearAllTakenOver();
+
+        expect(manager.isTakenOver('session-1')).toBe(false);
+        expect(manager.isTakenOver('session-2')).toBe(false);
+        expect(manager.isTakenOver('session-3')).toBe(false);
+      });
+
+      it('should be safe when empty', () => {
+        expect(() => manager.clearAllTakenOver()).not.toThrow();
+      });
+    });
+
+    describe('independence from isClaudeSession', () => {
+      it('isClaudeSession=true but isTakenOver=false for registered-only sessions', () => {
+        manager.registerSession('key-1', '/test/dir', 'session-reg');
+
+        expect(manager.isClaudeSession('session-reg')).toBe(true);
+        expect(manager.isTakenOver('session-reg')).toBe(false);
+      });
+
+      it('both true after registerSession + markTakenOver', () => {
+        manager.registerSession('key-1', '/test/dir', 'session-both');
+        manager.markTakenOver('session-both');
+
+        expect(manager.isClaudeSession('session-both')).toBe(true);
+        expect(manager.isTakenOver('session-both')).toBe(true);
+      });
+    });
+
+    describe('preserves session info', () => {
+      it('clearAllTakenOver does not affect closedSessions', () => {
+        manager.registerSession('key-1', '/test/dir', 'session-preserved');
+        manager.markTakenOver('session-preserved');
+
+        manager.clearAllTakenOver();
+
+        // Session is still registered (closedSessions intact), just not taken over
+        expect(manager.isClaudeSession('session-preserved')).toBe(true);
+        expect(manager.isTakenOver('session-preserved')).toBe(false);
       });
     });
   });

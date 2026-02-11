@@ -614,4 +614,59 @@ describe('PermissionIpcManager', () => {
       expect(results2).toEqual(['prompt-multi-listen']);
     });
   });
+
+  // =========================================================================
+  // 9. Static cleanupStaleTempFiles
+  // =========================================================================
+
+  describe('cleanupStaleTempFiles (static)', () => {
+    it('removes all files from forkoff-permissions temp directory', () => {
+      fs.mkdirSync(REAL_TEMP_DIR, { recursive: true });
+      // Write some stale files
+      fs.writeFileSync(path.join(REAL_TEMP_DIR, 'stale-1.request.json'), '{}', 'utf-8');
+      fs.writeFileSync(path.join(REAL_TEMP_DIR, 'stale-2.response.json'), '{}', 'utf-8');
+      fs.writeFileSync(path.join(REAL_TEMP_DIR, 'stale-3.request.json'), '{}', 'utf-8');
+
+      PermissionIpcManager.cleanupStaleTempFiles();
+
+      const remaining = fs.readdirSync(REAL_TEMP_DIR);
+      expect(remaining).toHaveLength(0);
+    });
+
+    it('does not throw when temp directory does not exist', () => {
+      // Remove the directory
+      try {
+        fs.rmSync(REAL_TEMP_DIR, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+
+      expect(() => PermissionIpcManager.cleanupStaleTempFiles()).not.toThrow();
+    });
+
+    it('does not throw when temp directory is empty', () => {
+      fs.mkdirSync(REAL_TEMP_DIR, { recursive: true });
+      // Ensure it's empty
+      for (const file of fs.readdirSync(REAL_TEMP_DIR)) {
+        fs.unlinkSync(path.join(REAL_TEMP_DIR, file));
+      }
+
+      expect(() => PermissionIpcManager.cleanupStaleTempFiles()).not.toThrow();
+    });
+
+    it('removes only files, not subdirectories', () => {
+      fs.mkdirSync(REAL_TEMP_DIR, { recursive: true });
+      fs.writeFileSync(path.join(REAL_TEMP_DIR, 'stale-file.json'), '{}', 'utf-8');
+      fs.mkdirSync(path.join(REAL_TEMP_DIR, 'subdir'), { recursive: true });
+
+      PermissionIpcManager.cleanupStaleTempFiles();
+
+      const remaining = fs.readdirSync(REAL_TEMP_DIR);
+      // subdir should remain, file should be gone
+      expect(remaining).toEqual(['subdir']);
+
+      // Cleanup the subdir for subsequent tests
+      fs.rmSync(path.join(REAL_TEMP_DIR, 'subdir'), { recursive: true, force: true });
+    });
+  });
 });
