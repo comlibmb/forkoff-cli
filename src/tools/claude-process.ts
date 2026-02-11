@@ -261,10 +261,10 @@ class ClaudeProcessManager extends EventEmitter {
       '--verbose',                      // Complete messages
     ];
 
-    // When unrestricted mode is enabled, use --dangerouslySkipPermissions for full access
+    // When unrestricted mode is enabled, use --dangerously-skip-permissions for full access
     // Otherwise configure interactive approval hooks and use default permission mode
     if (dangerouslySkipPermissions) {
-      args.push('--dangerouslySkipPermissions');
+      args.push('--dangerously-skip-permissions');
     } else {
       // Configure PreToolUse hook for interactive approvals
       this.configureHook(resolvedDir);
@@ -299,10 +299,10 @@ class ClaudeProcessManager extends EventEmitter {
       '--verbose',                      // Complete messages
     ];
 
-    // When unrestricted mode is enabled, use --dangerouslySkipPermissions for full access
+    // When unrestricted mode is enabled, use --dangerously-skip-permissions for full access
     // Otherwise configure interactive approval hooks and use default permission mode
     if (dangerouslySkipPermissions) {
-      args.push('--dangerouslySkipPermissions');
+      args.push('--dangerously-skip-permissions');
     } else {
       // Configure PreToolUse hook for interactive approvals
       this.configureHook(resolvedDir);
@@ -434,10 +434,10 @@ class ClaudeProcessManager extends EventEmitter {
       '--verbose',
     ];
 
-    // When unrestricted mode is enabled, use --dangerouslySkipPermissions
+    // When unrestricted mode is enabled, use --dangerously-skip-permissions
     // Otherwise configure interactive approval hooks
     if (dangerouslySkipPermissions) {
-      args.push('--dangerouslySkipPermissions');
+      args.push('--dangerously-skip-permissions');
     } else {
       this.configureHook(resolvedDir);
       this.startPermissionIpc(terminalSessionId);

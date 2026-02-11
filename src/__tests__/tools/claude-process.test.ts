@@ -66,46 +66,46 @@ describe('ClaudeProcessManager', () => {
 
   describe('Bug 1: dangerouslySkipPermissions flag', () => {
     describe('startSession', () => {
-      it('should NOT include --dangerouslySkipPermissions when flag is false', async () => {
+      it('should NOT include --dangerously-skip-permissions when flag is false', async () => {
         await manager.startSession('/test/dir', 'session-1', false);
 
         expect(mockSpawn).toHaveBeenCalledTimes(1);
         const args = mockSpawn.mock.calls[0][1];
-        expect(args).not.toContain('--dangerouslySkipPermissions');
+        expect(args).not.toContain('--dangerously-skip-permissions');
       });
 
-      it('should NOT include --dangerouslySkipPermissions when flag is undefined', async () => {
+      it('should NOT include --dangerously-skip-permissions when flag is undefined', async () => {
         await manager.startSession('/test/dir', 'session-1');
 
         expect(mockSpawn).toHaveBeenCalledTimes(1);
         const args = mockSpawn.mock.calls[0][1];
-        expect(args).not.toContain('--dangerouslySkipPermissions');
+        expect(args).not.toContain('--dangerously-skip-permissions');
       });
 
-      it('should include --dangerouslySkipPermissions when flag is true', async () => {
+      it('should include --dangerously-skip-permissions when flag is true', async () => {
         await manager.startSession('/test/dir', 'session-1', true);
 
         expect(mockSpawn).toHaveBeenCalledTimes(1);
         const args = mockSpawn.mock.calls[0][1];
-        expect(args).toContain('--dangerouslySkipPermissions');
+        expect(args).toContain('--dangerously-skip-permissions');
       });
     });
 
     describe('resumeSession', () => {
-      it('should NOT include --dangerouslySkipPermissions when flag is false (uses hooks instead)', async () => {
+      it('should NOT include --dangerously-skip-permissions when flag is false (uses hooks instead)', async () => {
         await manager.resumeSession('key-1', '/test/dir', 'session-1', false);
 
         const args = mockSpawn.mock.calls[0][1];
-        expect(args).not.toContain('--dangerouslySkipPermissions');
+        expect(args).not.toContain('--dangerously-skip-permissions');
         // No longer uses --permission-mode; interactive hooks handle permissions
         expect(args).not.toContain('--permission-mode');
       });
 
-      it('should use --dangerouslySkipPermissions when flag is true', async () => {
+      it('should use --dangerously-skip-permissions when flag is true', async () => {
         await manager.resumeSession('key-1', '/test/dir', 'session-1', true);
 
         const args = mockSpawn.mock.calls[0][1];
-        expect(args).toContain('--dangerouslySkipPermissions');
+        expect(args).toContain('--dangerously-skip-permissions');
         expect(args).not.toContain('--permission-mode');
       });
     });
