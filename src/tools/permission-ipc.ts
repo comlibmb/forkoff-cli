@@ -28,6 +28,9 @@ interface PendingPromptInfo {
   terminalSessionId: string;
   sessionKey?: string;
   timeoutId: NodeJS.Timeout;
+  toolName: string;
+  toolInput: any;
+  toolUseId: string;
 }
 
 interface PermissionPromptEvent {
@@ -203,6 +206,9 @@ class PermissionIpcManager extends EventEmitter {
           terminalSessionId: this.terminalSessionId,
           sessionKey: this.sessionKey,
           timeoutId,
+          toolName,
+          toolInput,
+          toolUseId,
         });
 
         // Build and emit the permission prompt event
@@ -235,6 +241,21 @@ class PermissionIpcManager extends EventEmitter {
   private handleTimeout(promptId: string): void {
     console.log(`[Permission IPC] Prompt ${promptId} timed out after ${this.TIMEOUT_MS / 1000}s`);
     this.handleResponse(promptId, 'deny', 'Timed out waiting for mobile response');
+  }
+
+  /**
+   * Get data for all currently pending prompts (excluding already-responded ones).
+   * Used to sync pending permissions to mobile on take-over.
+   */
+  getPendingPromptData(): PermissionPromptEvent[] {
+    return Array.from(this.pendingPrompts.values()).map(p => ({
+      promptId: p.promptId,
+      terminalSessionId: p.terminalSessionId,
+      sessionKey: p.sessionKey,
+      toolName: p.toolName,
+      toolInput: p.toolInput,
+      toolUseId: p.toolUseId,
+    }));
   }
 
   /**

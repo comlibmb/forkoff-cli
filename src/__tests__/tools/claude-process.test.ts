@@ -324,6 +324,54 @@ describe('ClaudeProcessManager', () => {
     });
   });
 
+  // ==================== getAllPendingPrompts ====================
+
+  describe('getAllPendingPrompts()', () => {
+    it('returns empty array when no IPC managers exist', () => {
+      expect(manager.getAllPendingPrompts()).toEqual([]);
+    });
+
+    it('returns empty array when IPC managers have no pending prompts', async () => {
+      // Start a session with interactivePermissions to create an IPC manager
+      // (hook script doesn't exist in test env, so IPC manager won't be created via configureHook,
+      //  but we can test the method itself returns [] when the map is empty)
+      expect(manager.getAllPendingPrompts()).toEqual([]);
+    });
+
+    it('delegates to IPC manager getPendingPromptData()', () => {
+      // Create a mock IPC manager and inject it
+      const mockIpcManager = {
+        getPendingPromptData: jest.fn().mockReturnValue([
+          {
+            promptId: 'p1',
+            terminalSessionId: 'ts1',
+            sessionKey: 'sk1',
+            toolName: 'Bash',
+            toolInput: { command: 'ls' },
+            toolUseId: 'toolu_1',
+          },
+          {
+            promptId: 'p2',
+            terminalSessionId: 'ts1',
+            sessionKey: 'sk1',
+            toolName: 'Edit',
+            toolInput: { file_path: '/a.ts' },
+            toolUseId: 'toolu_2',
+          },
+        ]),
+      };
+
+      // Inject mock IPC manager
+      (manager as any).permissionIpcManagers.set('ts1', mockIpcManager);
+
+      const result = manager.getAllPendingPrompts();
+      expect(mockIpcManager.getPendingPromptData).toHaveBeenCalled();
+      expect(result).toHaveLength(2);
+      expect(result[0].promptId).toBe('p1');
+      expect(result[1].promptId).toBe('p2');
+    });
+  });
+
   // ==================== Fix: takenOverSessions tracking ====================
 
   describe('takenOverSessions tracking', () => {
@@ -408,6 +456,108 @@ describe('ClaudeProcessManager', () => {
         // Session is still registered (closedSessions intact), just not taken over
         expect(manager.isClaudeSession('session-preserved')).toBe(true);
         expect(manager.isTakenOver('session-preserved')).toBe(false);
+      });
+    });
+  });
+
+  // ==================== Fix: Mobile-generated session keys (brainstorm) ====================
+
+  describe('isRealSession flag (brainstorm session fix)', () => {
+    describe('registerSession stores isRealSession', () => {
+      it('should store isRealSession=false for mobile-generated keys', () => {
+        manager.registerSession('brainstorm-12345', '/test/dir', 'session-bs', false, true, false);
+        expect(manager.isClaudeSession('session-bs')).toBe(true);
+      });
+
+      it('should store isRealSession=true for known Claude sessions', () => {
+        manager.registerSession('real-uuid-key', '/test/dir', 'session-real', false, true, true);
+        expect(manager.isClaudeSession('session-real')).toBe(true);
+      });
+
+      it('should default isRealSession to undefined when not specified', () => {
+        manager.registerSession('key-1', '/test/dir', 'session-default');
+        expect(manager.isClaudeSession('session-default')).toBe(true);
+      });
+    });
+
+    describe('sendInput with isRealSession=false uses startAndSendMessage', () => {
+      it('should call startAndSendMessage instead of resumeSession for non-real sessions', async () => {
+        manager.registerSession('brainstorm-99999', '/test/dir', 'bs-session', false, true, false);
+
+        const resumeSpy = jest.spyOn(manager, 'resumeSession');
+        const startSpy = jest.spyOn(manager, 'startAndSendMessage');
+
+        await manager.sendInput('bs-session', 'hello world');
+
+        // Should NOT call resumeSession
+        expect(resumeSpy).not.toHaveBeenCalled();
+        // SHOULD call startAndSendMessage with the directory and message
+        expect(startSpy).toHaveBeenCalledWith(
+          expect.stringContaining('test'),  // resolved directory
+          'bs-session',
+          'hello world',
+          false,
+          true
+        );
+      });
+
+      it('should still call resumeSession for real sessions (isRealSession=true)', async () => {
+        manager.registerSession('real-session-key', '/test/dir', 'real-session', false, true, true);
+
+        const resumeSpy = jest.spyOn(manager, 'resumeSession');
+        const startSpy = jest.spyOn(manager, 'startAndSendMessage');
+
+        await manager.sendInput('real-session', 'hello world');
+
+        expect(resumeSpy).toHaveBeenCalledWith(
+          'real-session-key',
+          expect.any(String),
+          'real-session',
+          false,
+          true
+        );
+        expect(startSpy).not.toHaveBeenCalled();
+      });
+
+      it('should call resumeSession when isRealSession is undefined (backward compat)', async () => {
+        manager.registerSession('old-key', '/test/dir', 'old-session');
+
+        const resumeSpy = jest.spyOn(manager, 'resumeSession');
+        const startSpy = jest.spyOn(manager, 'startAndSendMessage');
+
+        await manager.sendInput('old-session', 'hello');
+
+        expect(resumeSpy).toHaveBeenCalled();
+        expect(startSpy).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('close handler preserves captured session_id', () => {
+      it('should use processInfo.sessionKey (captured from SDK) over closure sessionKey', async () => {
+        // Start a session with NO sessionKey (like startAndSendMessage)
+        await manager.startSession('/test/dir', 'capture-session');
+
+        // Simulate SDK result with session_id
+        const resultMessage = {
+          type: 'result',
+          subtype: 'success',
+          session_id: 'real-claude-uuid-from-sdk',
+          cost_usd: 0.01,
+        };
+        mockProc.stdout.emit('data', Buffer.from(JSON.stringify(resultMessage) + '\n'));
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        // Now simulate process close
+        mockProc.emit('close', 0);
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        // The closedSessions should have the captured session_id, not undefined
+        const closedInfo = (manager as any).closedSessions.get('capture-session');
+        expect(closedInfo).toBeDefined();
+        // processInfo.sessionKey was set by the result handler,
+        // close handler should use it via resolvedSessionKey
+        expect(closedInfo.sessionKey).toBe('real-claude-uuid-from-sdk');
+        expect(closedInfo.isRealSession).toBe(true);
       });
     });
   });

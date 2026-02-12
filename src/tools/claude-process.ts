@@ -198,6 +198,7 @@ interface ClaudeProcessManagerEvents {
   thinking_content: [event: ThinkingContentEvent];
   token_usage: [event: TokenUsageEvent];
   task_progress: [event: TaskProgressEvent];
+  session_id_captured: [data: { terminalSessionId: string; sessionId: string; directory: string }];
 }
 
 /** Stores session info for auto-restart capability */
@@ -209,6 +210,8 @@ interface SessionRestartInfo {
   restartCount: number;
   dangerouslySkipPermissions?: boolean;
   interactivePermissions?: boolean;
+  /** Whether sessionKey is a real Claude session (from local scanner) vs mobile-generated key */
+  isRealSession?: boolean;
 }
 
 /** Tool activity event — non-blocking notification of tool execution */
@@ -377,6 +380,14 @@ class ClaudeProcessManager extends EventEmitter {
       return false;
     }
 
+    // If the session key is mobile-generated (not a real Claude session), start fresh
+    // instead of trying --resume with a non-existent key. The session_id capture in
+    // setupProcessHandlers will store the real key for subsequent messages.
+    if (restartInfo?.isRealSession === false) {
+      console.log(`[Claude Process] Session key is mobile-generated — starting fresh session instead of --resume`);
+      return this.startAndSendMessage(directory, terminalSessionId, input, restartInfo.dangerouslySkipPermissions, restartInfo.interactivePermissions);
+    }
+
     // Spawn a fresh Claude process for this message
     // IMPORTANT: We must write to stdin immediately after spawn - Claude CLI with
     // stream-json input format exits if it doesn't receive input quickly
@@ -518,16 +529,24 @@ class ClaudeProcessManager extends EventEmitter {
    * Register session info without spawning a process.
    * Used when mobile opens a session view - we store the info so we can spawn later on first message.
    */
-  registerSession(sessionKey: string, directory: string, terminalSessionId: string, dangerouslySkipPermissions?: boolean, interactivePermissions?: boolean): void {
-    console.log(`[Claude Process] Registering session: ${sessionKey} in ${directory}${dangerouslySkipPermissions ? ' (unrestricted)' : ''}${interactivePermissions ? ' (interactive)' : ''}`);
+  registerSession(sessionKey: string, directory: string, terminalSessionId: string, dangerouslySkipPermissions?: boolean, interactivePermissions?: boolean, isRealSession?: boolean): void {
+    // If we already captured a real Claude session key (from SDK output) for this
+    // terminalSessionId, preserve it. This prevents reconnects from overwriting
+    // the real key with the mobile-generated one (e.g. brainstorm-*).
+    const existing = this.closedSessions.get(terminalSessionId);
+    const effectiveSessionKey = (existing?.isRealSession && existing.sessionKey) ? existing.sessionKey : sessionKey;
+    const effectiveIsReal = (existing?.isRealSession) ? true : isRealSession;
+
+    console.log(`[Claude Process] Registering session: ${effectiveSessionKey} in ${directory}${dangerouslySkipPermissions ? ' (unrestricted)' : ''}${interactivePermissions ? ' (interactive)' : ''}${effectiveIsReal === false ? ' (fresh — no real Claude session)' : ''}`);
     this.closedSessions.set(terminalSessionId, {
-      sessionKey,
+      sessionKey: effectiveSessionKey,
       directory,
-      lastExitCode: 0,
+      lastExitCode: existing?.lastExitCode ?? 0,
       lastExitTime: Date.now(),
       restartCount: 0,
       dangerouslySkipPermissions,
       interactivePermissions,
+      isRealSession: effectiveIsReal,
     });
   }
 
@@ -595,7 +614,10 @@ class ClaudeProcessManager extends EventEmitter {
                     restartCount: 0,
                     dangerouslySkipPermissions: processInfo.dangerouslySkipPermissions,
                     interactivePermissions: processInfo.interactivePermissions,
+                    isRealSession: true, // Now we have a real Claude session key
                   });
+                  // Notify listeners so transcript watcher can switch to new session's JSONL file
+                  this.emit('session_id_captured', { terminalSessionId, sessionId: message.session_id, directory });
                 }
               }
             }
@@ -653,14 +675,21 @@ class ClaudeProcessManager extends EventEmitter {
         ? (existingInfo?.restartCount ?? 0)
         : 0;
 
+      // Use processInfo.sessionKey if it was captured from SDK output (e.g. session_id
+      // in result message after startAndSendMessage), otherwise fall back to the closure's
+      // sessionKey from setupProcessHandlers. This ensures fresh sessions get the real key.
+      const resolvedSessionKey = processInfo?.sessionKey || sessionKey;
+
       this.closedSessions.set(terminalSessionId, {
-        sessionKey,
+        sessionKey: resolvedSessionKey,
         directory,
         lastExitCode: exitCode,
         lastExitTime: Date.now(),
         restartCount,
         dangerouslySkipPermissions: processInfo?.dangerouslySkipPermissions,
         interactivePermissions: processInfo?.interactivePermissions,
+        // Once we have a real session key (captured from SDK), mark as real
+        isRealSession: resolvedSessionKey ? true : existingInfo?.isRealSession,
       });
 
       // Emit exit event
@@ -681,18 +710,31 @@ class ClaudeProcessManager extends EventEmitter {
       };
       this.emit('session_ended', endedEvent);
 
-      // Clean up permission IPC for this session
-      this.stopPermissionIpc(terminalSessionId);
+      // Only clean up IPC/hooks if no newer process has replaced this one.
+      // Race condition: when sendInput kills the old process and spawns a new one,
+      // the old close handler fires AFTER the new process starts, which would
+      // incorrectly tear down the new process's IPC and hooks.
+      const currentProcess = this.processes.get(terminalSessionId);
+      const isCurrentProcess = currentProcess?.process === proc;
 
-      // Remove hook config if no other sessions are using this directory
-      const otherSessionsInDir = Array.from(this.processes.values())
-        .filter(p => p.directory === directory && p.terminalSessionId !== terminalSessionId);
-      if (otherSessionsInDir.length === 0) {
-        this.removeHook(directory);
+      if (isCurrentProcess || !currentProcess) {
+        // Clean up permission IPC for this session
+        this.stopPermissionIpc(terminalSessionId);
+
+        // Remove hook config if no other sessions are using this directory
+        const otherSessionsInDir = Array.from(this.processes.values())
+          .filter(p => p.directory === directory && p.terminalSessionId !== terminalSessionId);
+        if (otherSessionsInDir.length === 0) {
+          this.removeHook(directory);
+        }
+      } else {
+        console.log(`[Claude Process] Skipping IPC/hook cleanup — newer process owns this session`);
       }
 
-      // Clean up
-      this.processes.delete(terminalSessionId);
+      // Clean up process map entry only if it's still this process
+      if (isCurrentProcess) {
+        this.processes.delete(terminalSessionId);
+      }
     });
 
     proc.on('error', (error: Error) => {
@@ -814,22 +856,31 @@ class ClaudeProcessManager extends EventEmitter {
   }
 
   /**
+   * Get all pending permission prompts across all IPC managers.
+   * Used to sync pending permissions to mobile on take-over.
+   */
+  getAllPendingPrompts(): PermissionPromptEvent[] {
+    const allPrompts: PermissionPromptEvent[] = [];
+    for (const [, ipcManager] of this.permissionIpcManagers) {
+      allPrompts.push(...ipcManager.getPendingPromptData());
+    }
+    return allPrompts;
+  }
+
+  /**
    * Auto-allow all pending permission prompts across all IPC managers.
    * Called when mobile disconnects so Claude doesn't hang waiting for approval.
    */
   autoAllowAllPendingPrompts(): void {
-    let count = 0;
-    for (const [, ipcManager] of this.permissionIpcManagers) {
-      const pending = (ipcManager as any).pendingPrompts as Map<string, any>;
-      if (pending) {
-        for (const promptId of Array.from(pending.keys())) {
-          ipcManager.handleResponse(promptId, 'allow', 'Auto-allowed: mobile disconnected');
-          count++;
-        }
+    const pending = this.getAllPendingPrompts();
+    for (const prompt of pending) {
+      // Find the IPC manager that owns this prompt and respond
+      for (const [, ipcManager] of this.permissionIpcManagers) {
+        ipcManager.handleResponse(prompt.promptId, 'allow', 'Auto-allowed: mobile disconnected');
       }
     }
-    if (count > 0) {
-      console.log(`[Claude Process] Auto-allowed ${count} pending permission prompt(s) on mobile disconnect`);
+    if (pending.length > 0) {
+      console.log(`[Claude Process] Auto-allowed ${pending.length} pending permission prompt(s) on mobile disconnect`);
     }
   }
 
@@ -851,6 +902,25 @@ class ClaudeProcessManager extends EventEmitter {
     }
 
     console.log(`[Claude Process] All permission hooks and IPC managers cleaned up`);
+  }
+
+  /**
+   * Write permission rules to disk so the hook script can read them.
+   * Rules are written to a well-known temp file that the hook reads on each invocation.
+   */
+  updatePermissionRules(rules: any[]): void {
+    const rulesDir = path.join(os.tmpdir(), 'forkoff-permissions');
+    const rulesFile = path.join(rulesDir, 'rules.json');
+
+    try {
+      if (!fs.existsSync(rulesDir)) {
+        fs.mkdirSync(rulesDir, { recursive: true });
+      }
+      fs.writeFileSync(rulesFile, JSON.stringify(rules, null, 2), 'utf-8');
+      console.log(`[Claude Process] Permission rules written to ${rulesFile}`);
+    } catch (err) {
+      console.error(`[Claude Process] Failed to write permission rules:`, (err as Error).message);
+    }
   }
 
   /**

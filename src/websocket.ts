@@ -161,12 +161,13 @@ export class WebSocketClient extends EventEmitter {
         reconnectionDelayMax: 5000,
       });
 
-      // DEBUG: Log ALL incoming events to diagnose routing issues
-      this.socket.onAny((eventName: string, ...args: any[]) => {
-        if (eventName !== 'pong' && eventName !== 'ping') {
-          console.log(`[WS-DEBUG] Event received: ${eventName}, args: ${JSON.stringify(args).substring(0, 200)}`);
-        }
-      });
+      // Debug logging — gated behind DEBUG env var to prevent flooding stdout
+      if (process.env.DEBUG) {
+        this.socket.onAny((eventName: string, ...args: any[]) => {
+          if (eventName === 'device_heartbeat_ack' || eventName === 'pong' || eventName === 'ping') return;
+          console.log(`[WS-DEBUG] ${eventName}`, JSON.stringify(args).substring(0, 200));
+        });
+      }
 
       this.socket.on('connect', () => {
         this.reconnectAttempts = 0;
@@ -174,12 +175,6 @@ export class WebSocketClient extends EventEmitter {
         this.emit('connected');
         this.startHeartbeat();
         resolve();
-      });
-
-      // DEBUG: Log ALL incoming events
-      this.socket.onAny((eventName: string, ...args: any[]) => {
-        if (eventName === 'device_heartbeat_ack') return; // Skip heartbeat acks
-        console.log(`[WS-DEBUG] Event received: ${eventName}`, JSON.stringify(args).substring(0, 200));
       });
 
       this.socket.on('disconnect', (reason) => {
@@ -293,6 +288,12 @@ export class WebSocketClient extends EventEmitter {
       this.socket.on('permission_response', (data: { promptId: string; decision: 'allow' | 'deny'; reason?: string }) => {
         console.log(`[WS] Received permission_response: ${data.promptId} -> ${data.decision}`);
         this.emit('permission_response', data);
+      });
+
+      // Listen for permission rules sync from mobile
+      this.socket.on('permission_rules_sync', (data: { sessionKey: string; terminalSessionId: string; rules: any[] }) => {
+        console.log(`[WS] Received permission_rules_sync: ${data.rules?.length || 0} rules`);
+        this.emit('permission_rules_sync', data);
       });
 
       // Listen for mobile disconnect notification from backend
@@ -494,6 +495,16 @@ export class WebSocketClient extends EventEmitter {
     };
   }): void {
     this.socket?.emit('token_usage', data);
+  }
+
+  // Send pending permissions sync to mobile (on take-over)
+  sendPendingPermissionsSync(data: {
+    sessionKey: string;
+    terminalSessionId: string;
+    prompts: any[];
+  }): void {
+    console.log(`[WS] Sending pending_permissions_sync: ${data.prompts.length} prompt(s)`);
+    this.socket?.emit('pending_permissions_sync', data);
   }
 
   // Send task progress to mobile

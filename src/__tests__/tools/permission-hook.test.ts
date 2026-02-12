@@ -29,14 +29,13 @@ jest.setTimeout(30000);
 const HOOK_SCRIPT = path.resolve(__dirname, '../../tools/permission-hook.ts');
 const TEMP_DIR = path.join(os.tmpdir(), 'forkoff-permissions');
 
-/** All tools the hook considers safe (must match the hook's SAFE_TOOLS set). */
+/** All tools the hook considers safe by default (must match DEFAULT_SAFE_TOOLS in the hook). */
 const SAFE_TOOLS = [
   'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
   'TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList',
   'TaskOutput', 'TaskStop', 'AskUserQuestion', 'Skill',
   'EnterPlanMode', 'ExitPlanMode',
   'mcp__ide__getDiagnostics', 'mcp__ide__executeCode',
-  'NotebookEdit',
 ];
 
 // ---------------------------------------------------------------------------
@@ -309,9 +308,17 @@ describe('Permission Hook Script', () => {
       expect(result.parsed!.hookSpecificOutput.permissionDecision).toBe('allow');
     });
 
-    it('auto-approves NotebookEdit tool', async () => {
+    it('treats NotebookEdit as dangerous by default (requires approval)', async () => {
       const input = makeInput({ tool_name: 'NotebookEdit' });
-      const result = await runHook(JSON.stringify(input));
+
+      const existing = snapshotTempDir();
+      const hookPromise = runHook(JSON.stringify(input));
+      const { content } = await waitForRequestFile(existing);
+
+      expect(content.toolName).toBe('NotebookEdit');
+
+      writeResponseFile(content.promptId, 'allow');
+      const result = await hookPromise;
 
       expect(result.exitCode).toBe(0);
       expect(result.parsed!.hookSpecificOutput.permissionDecision).toBe('allow');
@@ -595,4 +602,140 @@ describe('Permission Hook Script', () => {
       expect(result.parsed!.hookSpecificOutput.permissionDecision).toBe('deny');
     });
   });
+
+  // =========================================================================
+  // Dynamic rules loading (loadRules / matchesAnyPattern)
+  // =========================================================================
+
+  describe('dynamic rules', () => {
+    const RULES_FILE = path.join(TEMP_DIR, 'rules.json');
+
+    afterEach(() => {
+      // Clean up rules file
+      try {
+        if (fs.existsSync(RULES_FILE)) fs.unlinkSync(RULES_FILE);
+      } catch {
+        // ignore
+      }
+    });
+
+    it('uses default safe tools when no rules file exists', async () => {
+      // Ensure rules file does not exist
+      try { fs.unlinkSync(RULES_FILE); } catch { /* ok */ }
+
+      const input = makeInput({ tool_name: 'Read' });
+      const result = await runHook(JSON.stringify(input));
+
+      expect(result.exitCode).toBe(0);
+      expect(result.parsed!.hookSpecificOutput.permissionDecision).toBe('allow');
+    });
+
+    it('auto-approves Write when rules file marks it as allow', async () => {
+      // Write rules that allow Write
+      if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
+      const rules = [
+        { tool: 'Read', action: 'allow' },
+        { tool: 'Write', action: 'allow' },
+        { tool: 'Bash', action: 'ask' },
+      ];
+      fs.writeFileSync(RULES_FILE, JSON.stringify(rules), 'utf-8');
+
+      const input = makeInput({
+        tool_name: 'Write',
+        tool_input: { file_path: '/test.txt', content: 'hello' },
+      });
+      const result = await runHook(JSON.stringify(input));
+
+      expect(result.exitCode).toBe(0);
+      expect(result.parsed!.hookSpecificOutput.permissionDecision).toBe('allow');
+    });
+
+    it('requires approval for Read when rules file marks it as ask', async () => {
+      // Write rules that require approval for Read
+      if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
+      const rules = [
+        { tool: 'Read', action: 'ask' },
+        { tool: 'Bash', action: 'ask' },
+      ];
+      fs.writeFileSync(RULES_FILE, JSON.stringify(rules), 'utf-8');
+
+      const input = makeInput({ tool_name: 'Read' });
+      const existing = snapshotTempDir();
+      const hookPromise = runHook(JSON.stringify(input));
+      const { content } = await waitForRequestFile(existing);
+
+      expect(content.toolName).toBe('Read');
+
+      writeResponseFile(content.promptId, 'allow');
+      const result = await hookPromise;
+
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('auto-approves Bash command when it matches a pattern', async () => {
+      // Write rules: Bash is allowed with patterns
+      if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
+      const rules = [
+        { tool: 'Bash', action: 'allow', patterns: ['npm *', 'git status'] },
+        { tool: 'Read', action: 'allow' },
+      ];
+      fs.writeFileSync(RULES_FILE, JSON.stringify(rules), 'utf-8');
+
+      const input = makeInput({
+        tool_name: 'Bash',
+        tool_input: { command: 'npm test' },
+      });
+      const result = await runHook(JSON.stringify(input));
+
+      expect(result.exitCode).toBe(0);
+      expect(result.parsed!.hookSpecificOutput.permissionDecision).toBe('allow');
+      expect(result.parsed!.hookSpecificOutput.permissionDecisionReason).toContain('pattern');
+    });
+
+    it('requires approval for Bash command that does NOT match any pattern', async () => {
+      // Write rules: Bash is allowed but only for specific patterns
+      if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
+      const rules = [
+        { tool: 'Bash', action: 'allow', patterns: ['npm *', 'git status'] },
+        { tool: 'Read', action: 'allow' },
+      ];
+      fs.writeFileSync(RULES_FILE, JSON.stringify(rules), 'utf-8');
+
+      const input = makeInput({
+        tool_name: 'Bash',
+        tool_input: { command: 'rm -rf /' },
+      });
+
+      const existing = snapshotTempDir();
+      const hookPromise = runHook(JSON.stringify(input));
+      const { content } = await waitForRequestFile(existing);
+
+      expect(content.toolName).toBe('Bash');
+
+      writeResponseFile(content.promptId, 'deny', 'Not a safe command');
+      const result = await hookPromise;
+
+      expect(result.exitCode).toBe(2);
+      expect(result.parsed!.hookSpecificOutput.permissionDecision).toBe('deny');
+    });
+
+    it('falls back to defaults when rules file has invalid JSON', async () => {
+      if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
+      fs.writeFileSync(RULES_FILE, 'not valid json!!!', 'utf-8');
+
+      const input = makeInput({ tool_name: 'Read' });
+      const result = await runHook(JSON.stringify(input));
+
+      // Read is in defaults, so should be auto-approved
+      expect(result.exitCode).toBe(0);
+      expect(result.parsed!.hookSpecificOutput.permissionDecision).toBe('allow');
+    });
+  });
 });
+
+// ===========================================================================
+// Unit tests for exported helpers (loadRules, matchesAnyPattern)
+// These use integration-style tests via the hook subprocess since the module
+// runs main() on import. loadRules is tested via rules.json file + subprocess,
+// and matchesAnyPattern is tested via Bash patterns + subprocess.
+// ===========================================================================

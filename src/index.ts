@@ -622,7 +622,10 @@ async function startConnection(): Promise<void> {
       // Always register the session — even if it's running in a terminal.
       // With --resume, we spawn a new process per turn which picks up where the session left off.
       // If the terminal session holds a file lock, the spawn will fail gracefully.
-      claudeProcessManager.registerSession(data.sessionKey, resolvedDir, data.terminalSessionId, data.dangerouslySkipPermissions, data.interactivePermissions);
+      // isRealSession: true if the key matches a locally-known Claude session, false if mobile-generated
+      // (e.g. brainstorm-*, quick actions). Fresh sessions use startAndSendMessage instead of --resume.
+      const isRealSession = !!knownSession;
+      claudeProcessManager.registerSession(data.sessionKey, resolvedDir, data.terminalSessionId, data.dangerouslySkipPermissions, data.interactivePermissions, isRealSession);
       claudeProcessManager.markTakenOver(data.terminalSessionId);
 
       wsClient.sendToolStatusUpdate('claude_code', 'active');
@@ -633,6 +636,17 @@ async function startConnection(): Promise<void> {
         lastUsedAt: new Date().toISOString(),
       });
       wsClient.sendTerminalCwd({ terminalSessionId: data.terminalSessionId, cwd: resolvedDir });
+
+      // Sync any pending permission prompts to mobile
+      const pendingPrompts = claudeProcessManager.getAllPendingPrompts();
+      if (pendingPrompts.length > 0) {
+        console.log(chalk.yellow(`[Claude] Syncing ${pendingPrompts.length} pending permission prompt(s) to mobile`));
+        wsClient.sendPendingPermissionsSync({
+          sessionKey: data.sessionKey,
+          terminalSessionId: data.terminalSessionId,
+          prompts: pendingPrompts,
+        });
+      }
 
       // Notify mobile that the session is ready for input
       wsClient.sendClaudeSessionEvent({
@@ -845,7 +859,7 @@ async function startConnection(): Promise<void> {
 
       try {
         if (data.method === 'get_session_history') {
-          const { claudeSessionId, sessionKey, limit = 400, offset = 0 } = data.params;
+          const { claudeSessionId, sessionKey, directory, limit = 400, offset = 0 } = data.params;
           console.log(chalk.dim(`[RPC] get_session_history request received`));
 
           // Find the transcript file
@@ -896,10 +910,14 @@ async function startConnection(): Promise<void> {
             let session = sessions.find(s => s.sessionKey === sessionKey);
 
             // If no match by sessionKey, try to find most recent session for the same directory
-            if (!session && sessions.length > 0) {
-              // Just use the most recent session as fallback
-              session = sessions[0];
-              console.log(chalk.dim(`[RPC] Using most recent session as fallback: ${session.sessionKey}`));
+            if (!session && sessions.length > 0 && directory) {
+              const normalizedDir = path.resolve(directory);
+              session = sessions.find(s => path.resolve(s.directory) === normalizedDir);
+              if (session) {
+                console.log(chalk.dim(`[RPC] Using directory-matched session as fallback: ${session.sessionKey}`));
+              } else {
+                console.log(chalk.dim(`[RPC] No session found for directory: ${normalizedDir}`));
+              }
             }
 
             if (session?.transcriptPath) {
@@ -1012,6 +1030,14 @@ async function startConnection(): Promise<void> {
       claudeProcessManager.handlePermissionResponse(data.promptId, data.decision, data.reason);
     });
 
+    // Handle permission rules sync from mobile — write rules to disk for hook script
+    wsClient.on('permission_rules_sync', (data: any) => {
+      if (data.rules && Array.isArray(data.rules)) {
+        console.log(chalk.cyan(`[Claude] Permission rules sync: ${data.rules.length} rules`));
+        claudeProcessManager.updatePermissionRules(data.rules);
+      }
+    });
+
     // Handle mobile disconnect — full reset: clear taken-over, auto-allow pending, tear down hooks
     wsClient.on('mobile_disconnected', () => {
       console.log(chalk.yellow(`[Claude] Mobile disconnected — full permission reset`));
@@ -1113,6 +1139,35 @@ async function startConnection(): Promise<void> {
         sessionKey: data.sessionKey,
         usage: data.usage,
       });
+    });
+
+    // When a fresh session captures a real session_id, update the transcript
+    // file watcher so the mobile gets real-time updates from the correct JSONL file.
+    // This is critical for brainstorm/quick-action sessions where startAndSendMessage
+    // creates a new Claude session with a new transcript file.
+    claudeProcessManager.on('session_id_captured', (data: any) => {
+      const { terminalSessionId, sessionId } = data;
+      console.log(chalk.green(`[Claude] New session_id captured for ${terminalSessionId}: ${sessionId}`));
+
+      // Re-scan to pick up the new session's transcript path
+      const sessions = claudeSessionDetector.scanSessions();
+      const newSession = sessions.find((s: any) => s.sessionKey === sessionId);
+      if (newSession?.transcriptPath) {
+        console.log(chalk.green(`[Claude] Updating transcript watcher → ${newSession.transcriptPath}`));
+        transcriptStreamer.subscribeToUpdates(terminalSessionId, newSession.transcriptPath);
+      } else {
+        console.log(chalk.yellow(`[Claude] New session transcript not found yet, retrying in 1s...`));
+        setTimeout(() => {
+          const retrySessions = claudeSessionDetector.scanSessions();
+          const retrySession = retrySessions.find((s: any) => s.sessionKey === sessionId);
+          if (retrySession?.transcriptPath) {
+            console.log(chalk.green(`[Claude] Retry: updating transcript watcher → ${retrySession.transcriptPath}`));
+            transcriptStreamer.subscribeToUpdates(terminalSessionId, retrySession.transcriptPath);
+          } else {
+            console.log(chalk.yellow(`[Claude] Retry: still not found for ${sessionId}`));
+          }
+        }, 1000);
+      }
     });
 
     // Forward task progress to mobile

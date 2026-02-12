@@ -589,6 +589,77 @@ describe('PermissionIpcManager', () => {
   });
 
   // =========================================================================
+  // getPendingPromptData()
+  // =========================================================================
+
+  describe('getPendingPromptData()', () => {
+    it('returns empty array when no prompts are pending', () => {
+      manager.start('ts-empty');
+      expect(manager.getPendingPromptData()).toEqual([]);
+    });
+
+    it('returns pending prompt data with tool details', async () => {
+      const events: PermissionPromptEvent[] = [];
+      manager.on('permission_prompt', (evt) => events.push(evt));
+      manager.start('ts-pending-data', 'sk-abc');
+
+      writeRequestFile('prompt-data-1', {
+        toolName: 'Bash',
+        toolInput: { command: 'npm test' },
+        toolUseId: 'toolu_bash_01',
+      });
+
+      await waitFor(() => events.length > 0);
+
+      const pending = manager.getPendingPromptData();
+      expect(pending).toHaveLength(1);
+      expect(pending[0]).toEqual({
+        promptId: 'prompt-data-1',
+        terminalSessionId: 'ts-pending-data',
+        sessionKey: 'sk-abc',
+        toolName: 'Bash',
+        toolInput: { command: 'npm test' },
+        toolUseId: 'toolu_bash_01',
+      });
+    });
+
+    it('returns multiple pending prompts', async () => {
+      const events: PermissionPromptEvent[] = [];
+      manager.on('permission_prompt', (evt) => events.push(evt));
+      manager.start('ts-multi-pending');
+
+      writeRequestFile('prompt-mp-1', { toolName: 'Bash', toolInput: { command: 'ls' }, toolUseId: 'toolu_1' });
+      writeRequestFile('prompt-mp-2', { toolName: 'Edit', toolInput: { file_path: '/a.ts' }, toolUseId: 'toolu_2' });
+      writeRequestFile('prompt-mp-3', { toolName: 'Write', toolInput: { file_path: '/b.ts' }, toolUseId: 'toolu_3' });
+
+      await waitFor(() => events.length >= 3);
+
+      const pending = manager.getPendingPromptData();
+      expect(pending).toHaveLength(3);
+      const ids = pending.map(p => p.promptId).sort();
+      expect(ids).toEqual(['prompt-mp-1', 'prompt-mp-2', 'prompt-mp-3']);
+    });
+
+    it('excludes prompts that have been responded to', async () => {
+      const events: PermissionPromptEvent[] = [];
+      manager.on('permission_prompt', (evt) => events.push(evt));
+      manager.start('ts-exclude-responded');
+
+      writeRequestFile('prompt-keep', { toolName: 'Bash', toolInput: {}, toolUseId: 'toolu_k' });
+      writeRequestFile('prompt-respond', { toolName: 'Edit', toolInput: {}, toolUseId: 'toolu_r' });
+
+      await waitFor(() => events.length >= 2);
+
+      // Respond to one prompt
+      manager.handleResponse('prompt-respond', 'allow');
+
+      const pending = manager.getPendingPromptData();
+      expect(pending).toHaveLength(1);
+      expect(pending[0].promptId).toBe('prompt-keep');
+    });
+  });
+
+  // =========================================================================
   // EventEmitter inheritance
   // =========================================================================
 

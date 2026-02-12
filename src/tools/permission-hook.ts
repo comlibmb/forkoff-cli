@@ -7,9 +7,14 @@
  * child process, passes tool info via stdin JSON, and reads the permission
  * decision from stdout JSON.
  *
- * Safe tools are auto-approved immediately. Dangerous tools (Bash, Write,
- * Edit, etc.) write a request temp file and poll for a response file that
- * the main CLI process creates after receiving a mobile approval/denial.
+ * The hook reads user-configurable rules from a JSON file on disk (written by
+ * the CLI when mobile syncs rules). If no rules file exists, it falls back to
+ * a hardcoded default safe-tools set.
+ *
+ * Safe tools are auto-approved immediately. For Bash, command patterns are
+ * checked against user-defined glob patterns. Dangerous tools write a request
+ * temp file and poll for a response file that the main CLI process creates
+ * after receiving a mobile approval/denial.
  *
  * Exit codes:
  *   0 — allow (decision accepted)
@@ -27,7 +32,13 @@ import * as crypto from 'crypto';
 // Constants
 // ---------------------------------------------------------------------------
 
-const SAFE_TOOLS: ReadonlySet<string> = new Set([
+const TEMP_DIR = path.join(os.tmpdir(), 'forkoff-permissions');
+const RULES_FILE = path.join(TEMP_DIR, 'rules.json');
+const POLL_INTERVAL_MS = 200;
+const TIMEOUT_MS = 300_000; // 5 minutes
+
+/** Fallback safe tools when no rules file exists */
+const DEFAULT_SAFE_TOOLS: ReadonlySet<string> = new Set([
   'Read',
   'Glob',
   'Grep',
@@ -45,12 +56,7 @@ const SAFE_TOOLS: ReadonlySet<string> = new Set([
   'ExitPlanMode',
   'mcp__ide__getDiagnostics',
   'mcp__ide__executeCode',
-  'NotebookEdit',
 ]);
-
-const TEMP_DIR = path.join(os.tmpdir(), 'forkoff-permissions');
-const POLL_INTERVAL_MS = 200;
-const TIMEOUT_MS = 300_000; // 5 minutes
 
 // ---------------------------------------------------------------------------
 // Types
@@ -63,6 +69,12 @@ interface HookInput {
   tool_name: string;
   tool_input: Record<string, unknown>;
   tool_use_id: string;
+}
+
+interface PermissionRule {
+  tool: string;
+  action: 'allow' | 'ask';
+  patterns?: string[];
 }
 
 interface PermissionRequest {
@@ -90,7 +102,7 @@ interface HookOutput {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Write the decision JSON to stdout and exit with the appropriate code. */
+/** Write the decision JSON to stdout synchronously and exit immediately. */
 function respond(decision: 'allow' | 'deny', reason: string): never {
   const output: HookOutput = {
     hookSpecificOutput: {
@@ -100,18 +112,10 @@ function respond(decision: 'allow' | 'deny', reason: string): never {
     },
   };
 
-  process.stdout.write(JSON.stringify(output) + '\n', () => {
-    process.exit(decision === 'allow' ? 0 : 2);
-  });
-
-  // Fallback in case the write callback is never invoked (shouldn't happen).
-  // The timeout gives the write a chance to flush.
-  setTimeout(() => {
-    process.exit(decision === 'allow' ? 0 : 2);
-  }, 500);
-
-  // TypeScript needs this even though it's unreachable.
-  throw new Error('unreachable');
+  // Use synchronous write to fd 1 (stdout) — process.stdout.write() is async
+  // and the process would exit before the write completes.
+  fs.writeSync(1, JSON.stringify(output) + '\n');
+  process.exit(decision === 'allow' ? 0 : 2);
 }
 
 /** Ensure the temp directory exists. */
@@ -137,6 +141,64 @@ function cleanup(promptId: string): void {
   } catch {
     // Best effort.
   }
+}
+
+/**
+ * Load permission rules from the rules file on disk.
+ * Falls back to hardcoded defaults if the file doesn't exist or is invalid.
+ */
+export function loadRules(): { safeTools: Set<string>; bashPatterns: string[] } {
+  try {
+    const raw = fs.readFileSync(RULES_FILE, 'utf-8');
+    const rules: PermissionRule[] = JSON.parse(raw);
+
+    if (!Array.isArray(rules)) {
+      return { safeTools: new Set(DEFAULT_SAFE_TOOLS), bashPatterns: [] };
+    }
+
+    const safeTools = new Set<string>();
+    let bashPatterns: string[] = [];
+
+    for (const rule of rules) {
+      if (rule.action === 'allow') {
+        safeTools.add(rule.tool);
+        if (rule.tool === 'Bash' && Array.isArray(rule.patterns)) {
+          bashPatterns = rule.patterns;
+        }
+      }
+    }
+
+    return { safeTools, bashPatterns };
+  } catch {
+    return { safeTools: new Set(DEFAULT_SAFE_TOOLS), bashPatterns: [] };
+  }
+}
+
+/**
+ * Check if a command matches any of the given glob-like patterns.
+ * Patterns use simple glob matching where `*` matches any characters.
+ *
+ * @example
+ * matchesAnyPattern('npm test', ['npm *', 'git status']) // true
+ * matchesAnyPattern('rm -rf /', ['npm *', 'git status']) // false
+ */
+export function matchesAnyPattern(command: string, patterns: string[]): boolean {
+  for (const pattern of patterns) {
+    if (globMatch(command, pattern)) return true;
+  }
+  return false;
+}
+
+/**
+ * Simple glob matching: `*` matches any sequence of characters.
+ * The entire command must match (not just a prefix).
+ */
+function globMatch(str: string, pattern: string): boolean {
+  // Escape regex special chars except *, then replace * with .*
+  const regexStr = '^' + pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*') + '$';
+  return new RegExp(regexStr).test(str);
 }
 
 /**
@@ -201,10 +263,25 @@ async function main(): Promise<void> {
   const { tool_name: toolName, tool_input: toolInput, tool_use_id: toolUseId } = input;
 
   // ------------------------------------------------------------------
-  // Fast path: auto-approve safe tools.
+  // Load dynamic rules (from mobile sync) or fall back to defaults.
   // ------------------------------------------------------------------
-  if (SAFE_TOOLS.has(toolName)) {
-    respond('allow', `Auto-approved safe tool: ${toolName}`);
+  const { safeTools, bashPatterns } = loadRules();
+
+  // ------------------------------------------------------------------
+  // Fast path: auto-approve safe tools.
+  // For Bash with patterns, check command against patterns first.
+  // ------------------------------------------------------------------
+  if (safeTools.has(toolName)) {
+    if (toolName === 'Bash' && bashPatterns.length > 0) {
+      // Bash is allowed, but only for matching commands
+      const command = String(toolInput.command || '');
+      if (matchesAnyPattern(command, bashPatterns)) {
+        respond('allow', `Auto-approved: Bash command matches pattern`);
+      }
+      // Command doesn't match any pattern — fall through to ask user
+    } else {
+      respond('allow', `Auto-approved safe tool: ${toolName}`);
+    }
   }
 
   // ------------------------------------------------------------------
@@ -268,9 +345,6 @@ main().catch((err) => {
     },
   };
 
-  process.stdout.write(JSON.stringify(output) + '\n', () => {
-    process.exit(2);
-  });
-
-  setTimeout(() => process.exit(2), 500);
+  fs.writeSync(1, JSON.stringify(output) + '\n');
+  process.exit(2);
 });
