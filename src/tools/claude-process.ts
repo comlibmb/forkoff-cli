@@ -481,6 +481,22 @@ class ClaudeProcessManager extends EventEmitter {
       interactivePermissions: !!interactivePermissions,
     });
 
+    // Mark session as taken over so subsequent user_message events go through
+    // sendInput() instead of creating another fresh session each time
+    this.markTakenOver(terminalSessionId);
+
+    // Store restart info so sendInput can find session details if the process
+    // is killed before the SDK result captures the real session_id
+    this.closedSessions.set(terminalSessionId, {
+      directory: resolvedDir,
+      lastExitCode: 0,
+      lastExitTime: Date.now(),
+      restartCount: 0,
+      dangerouslySkipPermissions: !!dangerouslySkipPermissions,
+      interactivePermissions: !!interactivePermissions,
+      isRealSession: false, // Will become true when session_id is captured from SDK output
+    });
+
     // Format as JSONL user message and write immediately
     const jsonLine = JSON.stringify({
       type: 'user',

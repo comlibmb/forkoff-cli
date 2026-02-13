@@ -423,6 +423,7 @@ export class WebSocketClient extends EventEmitter {
     totalEntries: number;
     offset: number;
     hasMore: boolean;
+    requestedBy?: string;
   }): void {
     this.socket?.emit('transcript_history', data);
   }

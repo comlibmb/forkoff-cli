@@ -538,7 +538,6 @@ async function startConnection(): Promise<void> {
           const sessionTime = new Date(session.lastUsedAt).getTime();
           if (now - sessionTime < 60000) {
             session.state = 'active';
-            session.lastUsedAt = new Date().toISOString(); // Update to NOW for active sessions
             hasActiveSession = true;
           }
         }
@@ -549,6 +548,10 @@ async function startConnection(): Promise<void> {
           console.log(chalk.cyan(`[Claude] Claude is now ACTIVE`));
           wsClient.sendToolStatusUpdate('claude_code', 'active');
         }
+
+        // Seed the cache so startWatching doesn't re-emit these sessions
+        // individually as session_detected events
+        claudeSessionDetector.seedKnownSessions(sessions);
       }
 
       // Start watching for session changes
@@ -786,10 +789,13 @@ async function startConnection(): Promise<void> {
           data.limit || 100,
           data.reverse !== false // Default to true (most recent first)
         );
+        const payload = JSON.stringify(result.entries);
+        console.log(chalk.dim(`[Transcript] Sending history: ${result.entries.length} entries, ${result.totalEntries} total, payload ~${(payload.length / 1024).toFixed(0)}KB`));
         wsClient.sendTranscriptHistory({
           sessionKey: data.sessionKey,
           ...result,
           offset: data.offset || 0,
+          requestedBy: data.requestedBy,
         });
       } catch (error: any) {
         console.error(chalk.red(`[Transcript] Error: ${error.message}`));
@@ -838,7 +844,6 @@ async function startConnection(): Promise<void> {
           const sessionTime = new Date(session.lastUsedAt).getTime();
           if (now - sessionTime < 60000) {
             session.state = 'active';
-            session.lastUsedAt = new Date().toISOString(); // Update to NOW for active sessions
             hasActiveSession = true;
           }
         }
@@ -1109,9 +1114,14 @@ async function startConnection(): Promise<void> {
     claudeProcessManager.on('session_ended', (data: any) => {
       console.log(chalk.dim(`[Claude] Session ended: ${data.terminalSessionId}`));
       wsClient.sendToolStatusUpdate('claude_code', 'inactive');
-      if (data.sessionKey) {
+      // Use terminalSessionId as fallback — fresh sessions (startAndSendMessage) may not
+      // have captured the real session_id from SDK output before the process ended.
+      // The mobile references these sessions by terminalSessionId, so the inactive update
+      // must use it to prevent stale "active" sessions.
+      const key = data.sessionKey || data.terminalSessionId;
+      if (key) {
         wsClient.sendClaudeSessionUpdate({
-          sessionKey: data.sessionKey,
+          sessionKey: key,
           directory: data.directory,
           state: 'inactive',
           lastUsedAt: new Date().toISOString(),

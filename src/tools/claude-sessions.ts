@@ -261,6 +261,17 @@ class ClaudeSessionDetector extends EventEmitter {
   }
 
   /**
+   * Pre-populate the known sessions cache so that startWatching()
+   * doesn't re-emit sessions that were already sent via batch.
+   */
+  seedKnownSessions(sessions: ClaudeSessionInfo[]): void {
+    this.lastKnownSessions.clear();
+    for (const session of sessions) {
+      this.lastKnownSessions.set(session.sessionKey, session);
+    }
+  }
+
+  /**
    * Start watching for session changes
    */
   startWatching(intervalMs: number = 5000): void {
@@ -268,8 +279,12 @@ class ClaudeSessionDetector extends EventEmitter {
       return;
     }
 
-    // Initial scan
-    this.checkAndEmitChanges();
+    // If lastKnownSessions is empty, do an initial scan to populate cache.
+    // If seedKnownSessions() was called first, this is skipped and we only
+    // detect genuinely new sessions on the next interval tick.
+    if (this.lastKnownSessions.size === 0) {
+      this.checkAndEmitChanges();
+    }
 
     // Watch for changes
     this.watchInterval = setInterval(() => {
