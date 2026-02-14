@@ -208,11 +208,6 @@ export class WebSocketClient extends EventEmitter {
         this.emit('approval_response', data);
       });
 
-      // Listen for git clone requests
-      this.socket.on('git_clone', (data: any) => {
-        this.emit('git_clone', data);
-      });
-
       // Listen for user messages from mobile app
       this.socket.on('user_message', (data: UserMessageRequest) => {
         console.log(`[WS] Received user_message: ${data.message.substring(0, 50)}...`);

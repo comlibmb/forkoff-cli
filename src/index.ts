@@ -567,19 +567,6 @@ async function startConnection(): Promise<void> {
       console.log(chalk.red(`[Approval] Rejected: ${approval.description}`));
     });
 
-    wsClient.on('git_clone', async (data) => {
-      console.log(chalk.blue(`[Git] Clone request: ${data.repo.fullName}`));
-      try {
-        const result = await terminalManager.executeCommand(
-          `git-clone-${Date.now()}`,
-          data.command
-        );
-        console.log(chalk.green(`[Git] Clone completed with exit code: ${result.exitCode}`));
-      } catch (error: any) {
-        console.error(chalk.red(`[Git] Clone failed: ${error.message}`));
-      }
-    });
-
     // Handle Claude start session request from mobile
     wsClient.on('claude_start_session', async (data: any) => {
       console.log(chalk.cyan(`[Claude] Start session request: ${data.directory}`));
