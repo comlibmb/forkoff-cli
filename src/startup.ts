@@ -12,11 +12,14 @@ function getPlistPath(): string {
   return path.join(os.homedir(), 'Library', 'LaunchAgents', `${LAUNCHD_LABEL}.plist`);
 }
 
-function getBatPath(): string {
-  const configDir = process.platform === 'win32'
+function getStartupDir(): string {
+  return process.platform === 'win32'
     ? path.join(process.env.APPDATA || os.homedir(), 'forkoff-cli')
     : path.join(os.homedir(), '.config', 'forkoff-cli');
-  return path.join(configDir, 'startup.bat');
+}
+
+function getVbsPath(): string {
+  return path.join(getStartupDir(), 'startup.vbs');
 }
 
 export function getBinaryPath(): string {
@@ -89,12 +92,9 @@ export async function disableStartup(): Promise<void> {
 }
 
 async function enableStartupWindows(binaryPath: string): Promise<void> {
-  // Write a .bat wrapper that calls the .cmd shim npm creates for global packages.
-  // This works from any directory and respects npm's PATH setup.
-  const batPath = getBatPath();
-  const batDir = path.dirname(batPath);
-  if (!fs.existsSync(batDir)) {
-    fs.mkdirSync(batDir, { recursive: true });
+  const startupDir = getStartupDir();
+  if (!fs.existsSync(startupDir)) {
+    fs.mkdirSync(startupDir, { recursive: true });
   }
 
   // Resolve binaryPath to the .cmd shim if it exists (npm global installs create .cmd on Windows)
@@ -106,12 +106,16 @@ async function enableStartupWindows(binaryPath: string): Promise<void> {
     }
   }
 
-  const batContent = `@echo off\r\n"${cmdPath}" connect --quiet\r\n`;
-  fs.writeFileSync(batPath, batContent);
+  // Write a .vbs (VBScript) wrapper that launches the command with a hidden window.
+  // A .bat would open a visible cmd.exe window on every login — bad UX.
+  // WScript.Shell.Run with windowStyle 0 = hidden, False = don't wait.
+  const vbsPath = getVbsPath();
+  const vbsContent = `CreateObject("WScript.Shell").Run """${cmdPath}"" connect --quiet", 0, False\r\n`;
+  fs.writeFileSync(vbsPath, vbsContent);
 
   // Use HKCU Run key — no admin required, runs on user logon
   execSync(
-    `reg add "${REG_KEY}" /v ${REG_VALUE} /t REG_SZ /d "\\"${batPath}\\"" /f`,
+    `reg add "${REG_KEY}" /v ${REG_VALUE} /t REG_SZ /d "\\"${vbsPath}\\"" /f`,
     { stdio: 'pipe' }
   );
 }
@@ -124,14 +128,17 @@ async function disableStartupWindows(): Promise<void> {
     // Key didn't exist
   }
 
-  // Clean up the .bat wrapper
-  const batPath = getBatPath();
-  try {
-    if (fs.existsSync(batPath)) {
-      fs.unlinkSync(batPath);
+  // Clean up startup scripts
+  const startupDir = getStartupDir();
+  for (const file of ['startup.vbs', 'startup.bat']) {
+    try {
+      const p = path.join(startupDir, file);
+      if (fs.existsSync(p)) {
+        fs.unlinkSync(p);
+      }
+    } catch {
+      // Non-critical
     }
-  } catch {
-    // Non-critical
   }
 }
 

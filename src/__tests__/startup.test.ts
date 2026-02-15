@@ -158,7 +158,7 @@ describe('startup', () => {
       mockExistsSync.mockReturnValue(true);
     });
 
-    it('writes .bat wrapper using .cmd shim', async () => {
+    it('writes .vbs wrapper using .cmd shim with hidden window', async () => {
       // .cmd shim exists alongside the shell shim
       mockExistsSync.mockImplementation((p: string) => {
         if (typeof p === 'string' && p.endsWith('.cmd')) return true;
@@ -167,24 +167,26 @@ describe('startup', () => {
 
       await enableStartup();
 
-      const batCall = mockWriteFileSync.mock.calls.find(
-        (call: any[]) => typeof call[0] === 'string' && call[0].endsWith('startup.bat')
+      const vbsCall = mockWriteFileSync.mock.calls.find(
+        (call: any[]) => typeof call[0] === 'string' && call[0].endsWith('startup.vbs')
       );
-      expect(batCall).toBeDefined();
-      const batContent = batCall![1] as string;
-      expect(batContent).toContain('@echo off');
-      expect(batContent).toContain('.cmd');
-      expect(batContent).toContain('connect --quiet');
+      expect(vbsCall).toBeDefined();
+      const vbsContent = vbsCall![1] as string;
+      expect(vbsContent).toContain('WScript.Shell');
+      expect(vbsContent).toContain('.cmd');
+      expect(vbsContent).toContain('connect --quiet');
+      // windowStyle 0 = hidden, False = don't wait
+      expect(vbsContent).toContain(', 0, False');
     });
 
-    it('adds registry Run key with .bat path', async () => {
+    it('adds registry Run key with .vbs path', async () => {
       await enableStartup();
 
       const regCall = mockExecSync.mock.calls.find(
         (call: any[]) => typeof call[0] === 'string' && call[0].includes('reg add')
       );
       expect(regCall).toBeDefined();
-      expect(regCall![0]).toContain('startup.bat');
+      expect(regCall![0]).toContain('startup.vbs');
       expect(regCall![0]).toContain('ForkOffCLI');
     });
 
@@ -263,13 +265,13 @@ describe('startup', () => {
       expect(regCall![0]).toContain('ForkOffCLI');
     });
 
-    it('removes .bat file if it exists', async () => {
+    it('removes startup scripts if they exist', async () => {
       mockExistsSync.mockReturnValue(true);
 
       await disableStartup();
 
       expect(mockUnlinkSync).toHaveBeenCalledWith(
-        expect.stringContaining('startup.bat')
+        expect.stringContaining('startup.vbs')
       );
     });
 
