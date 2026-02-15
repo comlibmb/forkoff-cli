@@ -89,16 +89,24 @@ export async function disableStartup(): Promise<void> {
 }
 
 async function enableStartupWindows(binaryPath: string): Promise<void> {
-  // Write a .bat wrapper so the registry value is a single path.
-  // Quoting inside reg values is tricky when paths have spaces;
-  // a .bat file sidesteps this entirely.
-  const nodePath = process.execPath;
+  // Write a .bat wrapper that calls the .cmd shim npm creates for global packages.
+  // This works from any directory and respects npm's PATH setup.
   const batPath = getBatPath();
   const batDir = path.dirname(batPath);
   if (!fs.existsSync(batDir)) {
     fs.mkdirSync(batDir, { recursive: true });
   }
-  const batContent = `@echo off\r\n"${nodePath}" "${binaryPath}" connect --quiet\r\n`;
+
+  // Resolve binaryPath to the .cmd shim if it exists (npm global installs create .cmd on Windows)
+  let cmdPath = binaryPath;
+  if (!cmdPath.endsWith('.cmd')) {
+    const candidate = cmdPath + '.cmd';
+    if (fs.existsSync(candidate)) {
+      cmdPath = candidate;
+    }
+  }
+
+  const batContent = `@echo off\r\n"${cmdPath}" connect --quiet\r\n`;
   fs.writeFileSync(batPath, batContent);
 
   // Use HKCU Run key — no admin required, runs on user logon

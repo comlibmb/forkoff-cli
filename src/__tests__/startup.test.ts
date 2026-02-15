@@ -158,17 +158,22 @@ describe('startup', () => {
       mockExistsSync.mockReturnValue(true);
     });
 
-    it('writes .bat wrapper with correct content', async () => {
+    it('writes .bat wrapper using .cmd shim', async () => {
+      // .cmd shim exists alongside the shell shim
+      mockExistsSync.mockImplementation((p: string) => {
+        if (typeof p === 'string' && p.endsWith('.cmd')) return true;
+        return true; // default true for other checks
+      });
+
       await enableStartup();
 
       const batCall = mockWriteFileSync.mock.calls.find(
-        (call: any[]) => typeof call[0] === 'string' && call[0].endsWith('.bat')
+        (call: any[]) => typeof call[0] === 'string' && call[0].endsWith('startup.bat')
       );
       expect(batCall).toBeDefined();
       const batContent = batCall![1] as string;
       expect(batContent).toContain('@echo off');
-      expect(batContent).toContain('"C:\\Program Files\\nodejs\\node.exe"');
-      expect(batContent).toContain('"C:\\Users\\test\\AppData\\Roaming\\npm\\forkoff"');
+      expect(batContent).toContain('.cmd');
       expect(batContent).toContain('connect --quiet');
     });
 
