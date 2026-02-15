@@ -65,7 +65,7 @@ const defaultConfig: DeviceConfig = {
   pairingCode: null,
   pairedAt: null,
   userId: null,
-  startupEnabled: null,
+  startupEnabled: true,
   startupBinaryPath: null,
 };
 

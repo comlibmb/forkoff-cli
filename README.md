@@ -79,6 +79,7 @@ Keep this running to receive commands from your mobile app.
 | `forkoff startup --enable` | Enable automatic startup |
 | `forkoff startup --disable` | Disable automatic startup |
 | `forkoff startup --status` | Show startup registration status |
+| `forkoff help` | Show available commands and usage |
 
 ### Configuration Options
 
@@ -117,12 +118,12 @@ This is used by the automatic startup feature and is useful for running ForkOff 
 
 ### Automatic Startup
 
-When you run `forkoff pair` or `forkoff connect`, ForkOff automatically registers itself to start on login. This means you don't need to manually run `forkoff connect` every time you start your computer.
+ForkOff automatically starts on login so your device stays connected without manual intervention. Startup is **enabled by default** — when you run `forkoff pair` or `forkoff connect`, it registers itself to launch `forkoff connect --quiet` on login.
 
-- **Windows**: Uses Task Scheduler (`ForkOffCLI` task, runs on logon)
-- **macOS**: Uses launchd (`~/Library/LaunchAgents/app.forkoff.cli.plist`)
+- **Windows**: Adds a `ForkOffCLI` entry to the `HKCU\...\Run` registry key (no admin required)
+- **macOS**: Installs a launchd agent (`~/Library/LaunchAgents/app.forkoff.cli.plist`) with the explicit node binary path for nvm/fnm compatibility
 
-To opt out:
+To disable automatic startup:
 
 ```bash
 forkoff startup --disable
@@ -133,6 +134,8 @@ Once disabled, `pair` and `connect` will not re-register startup. To re-enable:
 ```bash
 forkoff startup --enable
 ```
+
+Running `forkoff disconnect` also removes the startup registration.
 
 ---
 

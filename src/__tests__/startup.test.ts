@@ -1,10 +1,10 @@
 /**
  * Tests for startup module
  * Covers:
- * - Bug 1: Windows .bat wrapper for schtasks (avoids nested quoting)
- * - Bug 2: macOS plist uses explicit node path (nvm/fnm compatibility)
+ * - Windows: .bat wrapper + HKCU Run registry key (no admin needed)
+ * - macOS: plist with explicit node path (nvm/fnm compatibility)
  * - disableStartup cleans up .bat file on Windows
- * - isStartupRegistered checks schtasks (win32) / plist existence (darwin)
+ * - isStartupRegistered checks registry (win32) / plist existence (darwin)
  * - getBinaryPath: cached, which/where, fallback to process.argv[1]
  */
 
@@ -109,18 +109,18 @@ describe('startup', () => {
   });
 
   describe('isStartupRegistered', () => {
-    it('returns true on win32 when schtasks query succeeds', () => {
+    it('returns true on win32 when registry key exists', () => {
       setPlatform('win32');
       mockExecSync.mockReturnValue('');
 
       expect(isStartupRegistered()).toBe(true);
       expect(mockExecSync).toHaveBeenCalledWith(
-        expect.stringContaining('schtasks /Query'),
+        expect.stringContaining('reg query'),
         { stdio: 'pipe' }
       );
     });
 
-    it('returns false on win32 when schtasks query throws', () => {
+    it('returns false on win32 when registry key missing', () => {
       setPlatform('win32');
       mockExecSync.mockImplementation(() => { throw new Error('not found'); });
 
@@ -172,15 +172,15 @@ describe('startup', () => {
       expect(batContent).toContain('connect --quiet');
     });
 
-    it('calls schtasks /Create with .bat path', async () => {
+    it('adds registry Run key with .bat path', async () => {
       await enableStartup();
 
-      const createCall = mockExecSync.mock.calls.find(
-        (call: any[]) => typeof call[0] === 'string' && call[0].includes('schtasks /Create')
+      const regCall = mockExecSync.mock.calls.find(
+        (call: any[]) => typeof call[0] === 'string' && call[0].includes('reg add')
       );
-      expect(createCall).toBeDefined();
-      expect(createCall![0]).toContain('startup.bat');
-      expect(createCall![0]).toContain('/SC ONLOGON');
+      expect(regCall).toBeDefined();
+      expect(regCall![0]).toContain('startup.bat');
+      expect(regCall![0]).toContain('ForkOffCLI');
     });
 
     it('sets config.startupEnabled = true', async () => {
@@ -248,13 +248,14 @@ describe('startup', () => {
       setPlatform('win32');
     });
 
-    it('calls schtasks /Delete', async () => {
+    it('removes registry Run key', async () => {
       await disableStartup();
 
-      const deleteCall = mockExecSync.mock.calls.find(
-        (call: any[]) => typeof call[0] === 'string' && call[0].includes('schtasks /Delete')
+      const regCall = mockExecSync.mock.calls.find(
+        (call: any[]) => typeof call[0] === 'string' && call[0].includes('reg delete')
       );
-      expect(deleteCall).toBeDefined();
+      expect(regCall).toBeDefined();
+      expect(regCall![0]).toContain('ForkOffCLI');
     });
 
     it('removes .bat file if it exists', async () => {

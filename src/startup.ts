@@ -4,7 +4,8 @@ import * as os from 'os';
 import { execSync } from 'child_process';
 import { config } from './config';
 
-const TASK_NAME = 'ForkOffCLI';
+const REG_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+const REG_VALUE = 'ForkOffCLI';
 const LAUNCHD_LABEL = 'app.forkoff.cli';
 
 function getPlistPath(): string {
@@ -49,7 +50,7 @@ export function getBinaryPath(): string {
 export function isStartupRegistered(): boolean {
   if (process.platform === 'win32') {
     try {
-      execSync(`schtasks /Query /TN "${TASK_NAME}"`, { stdio: 'pipe' });
+      execSync(`reg query "${REG_KEY}" /v ${REG_VALUE}`, { stdio: 'pipe' });
       return true;
     } catch {
       return false;
@@ -88,16 +89,9 @@ export async function disableStartup(): Promise<void> {
 }
 
 async function enableStartupWindows(binaryPath: string): Promise<void> {
-  // Remove existing task first (idempotent)
-  try {
-    execSync(`schtasks /Delete /TN "${TASK_NAME}" /F`, { stdio: 'pipe' });
-  } catch {
-    // Task didn't exist
-  }
-
-  // Write a .bat wrapper to avoid nested quoting issues with schtasks /TR.
-  // When nodePath or binaryPath contain spaces (e.g. "C:\Program Files\..."),
-  // schtasks misparses the /TR value. A single .bat path avoids this entirely.
+  // Write a .bat wrapper so the registry value is a single path.
+  // Quoting inside reg values is tricky when paths have spaces;
+  // a .bat file sidesteps this entirely.
   const nodePath = process.execPath;
   const batPath = getBatPath();
   const batDir = path.dirname(batPath);
@@ -107,18 +101,19 @@ async function enableStartupWindows(binaryPath: string): Promise<void> {
   const batContent = `@echo off\r\n"${nodePath}" "${binaryPath}" connect --quiet\r\n`;
   fs.writeFileSync(batPath, batContent);
 
-  // Schedule the .bat file — single path, no nested quotes
+  // Use HKCU Run key — no admin required, runs on user logon
   execSync(
-    `schtasks /Create /TN "${TASK_NAME}" /TR "\\"${batPath}\\"" /SC ONLOGON /RL LIMITED /F`,
+    `reg add "${REG_KEY}" /v ${REG_VALUE} /t REG_SZ /d "\\"${batPath}\\"" /f`,
     { stdio: 'pipe' }
   );
 }
 
 async function disableStartupWindows(): Promise<void> {
+  // Remove registry Run key
   try {
-    execSync(`schtasks /Delete /TN "${TASK_NAME}" /F`, { stdio: 'pipe' });
+    execSync(`reg delete "${REG_KEY}" /v ${REG_VALUE} /f`, { stdio: 'pipe' });
   } catch {
-    // Task didn't exist
+    // Key didn't exist
   }
 
   // Clean up the .bat wrapper
