@@ -153,6 +153,7 @@ export class WebSocketClient extends EventEmitter {
           userId, // Include userId so API can track by user even if device not in DB
           clientType: 'session-scoped',
           sessionId,
+          cliVersion: require('../package.json').version,
         },
         transports: ['websocket'],
         reconnection: true,
