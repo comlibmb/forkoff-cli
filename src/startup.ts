@@ -11,6 +11,13 @@ function getPlistPath(): string {
   return path.join(os.homedir(), 'Library', 'LaunchAgents', `${LAUNCHD_LABEL}.plist`);
 }
 
+function getBatPath(): string {
+  const configDir = process.platform === 'win32'
+    ? path.join(process.env.APPDATA || os.homedir(), 'forkoff-cli')
+    : path.join(os.homedir(), '.config', 'forkoff-cli');
+  return path.join(configDir, 'startup.bat');
+}
+
 export function getBinaryPath(): string {
   // Check cached path
   if (config.startupBinaryPath && fs.existsSync(config.startupBinaryPath)) {
@@ -88,13 +95,21 @@ async function enableStartupWindows(binaryPath: string): Promise<void> {
     // Task didn't exist
   }
 
-  // Find node executable
+  // Write a .bat wrapper to avoid nested quoting issues with schtasks /TR.
+  // When nodePath or binaryPath contain spaces (e.g. "C:\Program Files\..."),
+  // schtasks misparses the /TR value. A single .bat path avoids this entirely.
   const nodePath = process.execPath;
+  const batPath = getBatPath();
+  const batDir = path.dirname(batPath);
+  if (!fs.existsSync(batDir)) {
+    fs.mkdirSync(batDir, { recursive: true });
+  }
+  const batContent = `@echo off\r\n"${nodePath}" "${binaryPath}" connect --quiet\r\n`;
+  fs.writeFileSync(batPath, batContent);
 
-  // Create scheduled task that runs on logon
-  const taskCommand = `"${nodePath}" "${binaryPath}" connect --quiet`;
+  // Schedule the .bat file — single path, no nested quotes
   execSync(
-    `schtasks /Create /TN "${TASK_NAME}" /TR ${taskCommand} /SC ONLOGON /RL LIMITED /F`,
+    `schtasks /Create /TN "${TASK_NAME}" /TR "\\"${batPath}\\"" /SC ONLOGON /RL LIMITED /F`,
     { stdio: 'pipe' }
   );
 }
@@ -104,6 +119,16 @@ async function disableStartupWindows(): Promise<void> {
     execSync(`schtasks /Delete /TN "${TASK_NAME}" /F`, { stdio: 'pipe' });
   } catch {
     // Task didn't exist
+  }
+
+  // Clean up the .bat wrapper
+  const batPath = getBatPath();
+  try {
+    if (fs.existsSync(batPath)) {
+      fs.unlinkSync(batPath);
+    }
+  } catch {
+    // Non-critical
   }
 }
 
@@ -116,6 +141,18 @@ async function enableStartupMacOS(binaryPath: string): Promise<void> {
     fs.mkdirSync(configDir, { recursive: true });
   }
 
+  // Use the current node binary explicitly as the first ProgramArgument.
+  // Users with nvm/fnm have node outside the default PATH, so launchd
+  // can't find node via the shebang. Including process.execPath directly
+  // ensures the plist always uses the correct node binary.
+  const nodePath = process.execPath;
+  const nodeDir = path.dirname(nodePath);
+
+  // Build PATH that includes the current node binary's directory,
+  // so any child processes also find the right node.
+  const defaultPath = '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin';
+  const envPath = defaultPath.includes(nodeDir) ? defaultPath : `${nodeDir}:${defaultPath}`;
+
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -124,6 +161,7 @@ async function enableStartupMacOS(binaryPath: string): Promise<void> {
   <string>${LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
+    <string>${nodePath}</string>
     <string>${binaryPath}</string>
     <string>connect</string>
     <string>--quiet</string>
@@ -144,7 +182,7 @@ async function enableStartupMacOS(binaryPath: string): Promise<void> {
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <string>${envPath}</string>
   </dict>
 </dict>
 </plist>`;

@@ -16,12 +16,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
+export function createProgram(): Command {
 const program = new Command();
 
 program
   .name('forkoff')
   .description('CLI tool for ForkOff - Connect your AI coding tools to mobile')
-  .version('1.0.0')
+  .version(require('../package.json').version)
   .option('-q, --quiet', 'Suppress all output (for background operation)');
 
 program.hook('preAction', () => {
@@ -228,6 +229,12 @@ program
   .description('Disconnect and unpair device')
   .action(async () => {
     wsClient.disconnect();
+
+    // Disable startup registration so it doesn't run on boot after unpair
+    if (isStartupRegistered()) {
+      try { await disableStartup(); } catch {}
+    }
+
     config.userId = null;
     config.pairedAt = null;
     config.pairingCode = null;
@@ -1242,5 +1249,24 @@ async function waitForPairing(deviceId: string): Promise<void> {
   });
 }
 
-// Run the CLI
-program.parse();
+// Help command
+program
+  .command('help')
+  .description('Show available commands and usage')
+  .action(() => { program.outputHelp(); });
+
+// Unknown command handling
+program.showHelpAfterError('Run "forkoff help" for available commands.');
+program.on('command:*', (operands) => {
+  console.error(`Unknown command: ${operands[0]}\n`);
+  console.log('Run "forkoff help" for available commands.');
+  process.exitCode = 1;
+});
+
+return program;
+}
+
+// Run the CLI (skip when loaded as a module in tests)
+if (require.main === module) {
+  createProgram().parse();
+}
