@@ -118,7 +118,6 @@ interface ClaudeApprovalResponse {
 export class WebSocketClient extends EventEmitter {
   private socket: Socket | null = null;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 10;
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private _sessionId: string = '';
 
@@ -157,10 +156,22 @@ export class WebSocketClient extends EventEmitter {
         },
         transports: ['websocket'],
         reconnection: true,
-        reconnectionAttempts: this.maxReconnectAttempts,
+        reconnectionAttempts: Infinity,
         reconnectionDelay: 1000,
-        reconnectionDelayMax: 5000,
+        reconnectionDelayMax: 30000,
+        randomizationFactor: 0.5,
       });
+
+      // Track whether the initial connect promise has been settled
+      let settled = false;
+
+      // 30-second timeout for initial connection attempt
+      const connectTimeout = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error('Initial connection timed out after 30 seconds'));
+        }
+      }, 30000);
 
       // Debug logging — gated behind DEBUG env var to prevent flooding stdout
       if (process.env.DEBUG) {
@@ -171,14 +182,24 @@ export class WebSocketClient extends EventEmitter {
       }
 
       this.socket.on('connect', () => {
+        if (this.reconnectAttempts > 0) {
+          console.log(`[WS] Reconnected after ${this.reconnectAttempts} attempt(s)`);
+          this.emit('reconnected', { attempts: this.reconnectAttempts });
+          this.sendHeartbeat();
+        }
         this.reconnectAttempts = 0;
         console.log(`[WS] Connected with deviceId: ${deviceId}, sessionId: ${sessionId}`);
         this.emit('connected');
         this.startHeartbeat();
-        resolve();
+        if (!settled) {
+          settled = true;
+          clearTimeout(connectTimeout);
+          resolve();
+        }
       });
 
       this.socket.on('disconnect', (reason) => {
+        console.log(`[WS] Disconnected: ${reason} — will continue retrying`);
         this.emit('disconnected', reason);
         this.stopHeartbeat();
       });
@@ -186,10 +207,7 @@ export class WebSocketClient extends EventEmitter {
       this.socket.on('connect_error', (error) => {
         this.reconnectAttempts++;
         this.emit('error', error);
-
-        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-          reject(new Error('Failed to connect after maximum attempts'));
-        }
+        this.emit('reconnecting', { attempt: this.reconnectAttempts });
       });
 
       // Listen for terminal create requests from mobile app
