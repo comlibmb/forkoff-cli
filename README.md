@@ -8,14 +8,11 @@
   <strong>Bridge your AI coding tools to your mobile device</strong>
 </p>
 
-> ## ⚠️ **WAITLIST ONLY - NOT PUBLICLY AVAILABLE YET**
+> ## 🚀 **OPEN BETA**
 >
-> **This package requires an invitation to use.** ForkOff is currently in private beta with a waitlist.
+> ForkOff is now in **open beta**! Download the mobile app and get started:
 >
-> 🔗 **Join the waitlist at [forkoff.app](https://forkoff.app)**
->
-> After joining the waitlist, you'll receive an invitation email with access instructions.
-> The CLI will not work without an active account invitation.
+> 📱 **[Join the TestFlight Beta](https://testflight.apple.com/join/dhh5FrN7)**
 
 ---
 
