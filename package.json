@@ -1,6 +1,6 @@
 {
   "name": "forkoff",
-  "version": "1.0.18",
+  "version": "1.0.19",
   "description": "CLI tool to connect your AI coding tools to mobile | Open Beta - Download the app: https://testflight.apple.com/join/dhh5FrN7",
   "main": "dist/integration.js",
   "types": "dist/integration.d.ts",
@@ -48,7 +48,7 @@
     "email": "support@forkoff.app",
     "url": "https://forkoff.app"
   },
-  "license": "Proprietary",
+  "license": "MIT",
   "dependencies": {
     "chalk": "^4.1.2",
     "chokidar": "^3.6.0",
