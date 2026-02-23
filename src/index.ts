@@ -3,18 +3,31 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import qrcode from 'qrcode-terminal';
+import * as crypto from 'crypto';
 import { config } from './config';
-import { api } from './api';
 import { wsClient } from './websocket';
 import { terminalManager } from './terminal';
 import { approvalManager } from './approval';
 import { toolDetector, claudeHooksManager, claudeSessionDetector, claudeProcessManager, PermissionIpcManager } from './tools';
 import { transcriptStreamer } from './transcript-streamer';
-import { setQuiet, createSpinner } from './logger';
+import { setQuiet, setDebug, closeDebugLog, cleanupOldLogs, getLogFilePath, createSpinner } from './logger';
 import { enableStartup, disableStartup, isStartupRegistered, getBinaryPath } from './startup';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+
+/** Get the local network IP (first non-internal IPv4 address) */
+function getLocalIp(): string {
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]!) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        return iface.address;
+      }
+    }
+  }
+  return '127.0.0.1';
+}
 
 export function createProgram(): Command {
 const program = new Command();
@@ -23,20 +36,24 @@ program
   .name('forkoff')
   .description('CLI tool for ForkOff - Connect your AI coding tools to mobile')
   .version(require('../package.json').version)
-  .option('-q, --quiet', 'Suppress all output (for background operation)');
+  .option('-q, --quiet', 'Suppress all output (for background operation)')
+  .option('--debug', 'Enable debug logging to file (~/.forkoff-cli/logs/)');
 
 program.hook('preAction', () => {
+  if (program.opts().debug) {
+    setDebug(true);
+    cleanupOldLogs(10);
+  }
   if (program.opts().quiet) {
     setQuiet(true);
   }
 });
 
-// Configure API/WS URLs
+// Configure CLI settings
 program
   .command('config')
   .description('Configure ForkOff CLI settings')
-  .option('-a, --api <url>', 'Set API URL')
-  .option('-w, --ws <url>', 'Set WebSocket URL')
+  .option('-p, --port <port>', 'Set relay server port')
   .option('-n, --name <name>', 'Set device name')
   .option('--show', 'Show current configuration')
   .option('--reset', 'Reset all configuration')
@@ -47,14 +64,14 @@ program
       return;
     }
 
-    if (options.api) {
-      config.apiUrl = options.api;
-      console.log(chalk.green(`API URL set to: ${options.api}`));
-    }
-
-    if (options.ws) {
-      config.wsUrl = options.ws;
-      console.log(chalk.green(`WebSocket URL set to: ${options.ws}`));
+    if (options.port) {
+      const port = parseInt(options.port, 10);
+      if (isNaN(port) || port < 1 || port > 65535) {
+        console.log(chalk.red('Invalid port number. Must be between 1 and 65535.'));
+        return;
+      }
+      config.relayPort = port;
+      console.log(chalk.green(`Relay port set to: ${port}`));
     }
 
     if (options.name) {
@@ -62,10 +79,11 @@ program
       console.log(chalk.green(`Device name set to: ${options.name}`));
     }
 
-    if (options.show || (!options.api && !options.ws && !options.name && !options.reset)) {
+    if (options.show || (!options.port && !options.name && !options.reset)) {
+      const localIp = getLocalIp();
       console.log(chalk.bold('\nCurrent Configuration:'));
-      console.log(`  API URL:     ${chalk.cyan(config.apiUrl)}`);
-      console.log(`  WebSocket:   ${chalk.cyan(config.wsUrl)}`);
+      console.log(`  Relay URL:   ${chalk.cyan(`ws://${localIp}:${config.relayPort}`)}`);
+      console.log(`  Relay Port:  ${chalk.cyan(String(config.relayPort))}`);
       console.log(`  Device Name: ${chalk.cyan(config.deviceName)}`);
       console.log(`  Device ID:   ${chalk.cyan(config.deviceId || 'Not registered')}`);
       console.log(`  Paired:      ${config.isPaired ? chalk.green('Yes') : chalk.yellow('No')}`);
@@ -82,61 +100,52 @@ program
   .command('pair')
   .description('Generate pairing code to connect with mobile app')
   .action(async () => {
-    const spinner = createSpinner('Connecting to ForkOff server...').start();
+    const spinner = createSpinner('Starting relay server...').start();
 
     try {
-      // Check server health
-      const isHealthy = await api.healthCheck();
-      if (!isHealthy) {
-        spinner.fail('Cannot connect to ForkOff server');
-        console.log(chalk.yellow(`\nMake sure the server is running at ${config.apiUrl}`));
-        console.log(chalk.dim('Use "forkoff config --api <url>" to change the server URL'));
-        return;
-      }
+      // Ensure we have a deviceId
+      config.ensureDeviceId();
 
-      spinner.text = 'Registering device...';
+      // Start embedded relay server
+      await wsClient.startServer(config.relayPort);
 
-      // Register device or refresh pairing code
-      let result;
-      if (config.deviceId) {
-        try {
-          result = await api.refreshPairingCode(config.deviceId);
-        } catch {
-          // Device might not exist anymore, register fresh
-          result = await api.registerDevice();
-        }
-      } else {
-        result = await api.registerDevice();
-      }
+      // Generate random 8-char pairing code
+      const pairingCode = crypto.randomBytes(4).toString('hex').toUpperCase().slice(0, 8);
+      config.pairingCode = pairingCode;
 
-      // Save device info
-      config.deviceId = result.device.id;
-      config.pairingCode = result.pairingCode;
+      // Set pairing code on server for in-process validation
+      wsClient.setPairingCode(pairingCode);
 
-      spinner.succeed('Device registered successfully!\n');
+      const localIp = getLocalIp();
+      const relayUrl = `ws://${localIp}:${config.relayPort}`;
+
+      spinner.succeed(`Relay server started on ${relayUrl}\n`);
 
       // Display pairing info
       console.log(chalk.bold('Scan this QR code with the ForkOff mobile app:\n'));
 
-      // Generate QR code with pairing URL
-      const pairingUrl = `forkoff://pair/${result.pairingCode}`;
+      const pairingUrl = `forkoff://pair/${pairingCode}?relay=${encodeURIComponent(relayUrl)}`;
       qrcode.generate(pairingUrl, { small: true }, (code) => {
         console.log(code);
       });
 
       console.log(chalk.bold('\nOr enter this code manually:\n'));
-      console.log(chalk.bgBlue.white.bold(`  ${result.pairingCode}  `));
+      console.log(chalk.bgBlue.white.bold(`  ${pairingCode}  `));
       console.log();
-
-      const expiresAt = new Date(result.expiresAt);
-      console.log(chalk.dim(`Code expires at: ${expiresAt.toLocaleTimeString()}`));
+      console.log(chalk.dim(`Relay: ${relayUrl}`));
       console.log();
 
       // Wait for pairing
       console.log(chalk.yellow('Waiting for mobile app to scan...'));
       console.log(chalk.dim('Press Ctrl+C to cancel\n'));
 
-      await waitForPairing(result.device.id);
+      const pairData = await waitForPairing();
+
+      // Server already sent pair_device_ack to mobile
+      config.pairedAt = new Date().toISOString();
+
+      console.log(chalk.green('\n\u2713 Device paired successfully!'));
+      console.log(chalk.dim('\nStarting connection...\n'));
 
       // Auto-register startup if not explicitly disabled
       if (config.startupEnabled !== false) {
@@ -148,10 +157,10 @@ program
         }
       }
 
-      // Auto-connect after successful pairing
+      // Continue to main connection (server already running)
       await startConnection();
     } catch (error: any) {
-      spinner.fail('Failed to register device');
+      spinner.fail('Failed to pair device');
       console.error(chalk.red(error.message || 'Unknown error'));
     }
   });
@@ -166,32 +175,15 @@ program
       return;
     }
 
-    const spinner = createSpinner('Checking status...').start();
-
-    try {
-      const status = await api.checkPairingStatus(config.deviceId);
-
-      spinner.stop();
-
-      console.log(chalk.bold('\nDevice Status:'));
-      console.log(`  Device ID:   ${chalk.cyan(config.deviceId)}`);
-      console.log(`  Device Name: ${chalk.cyan(config.deviceName)}`);
-      console.log(`  Paired:      ${status.isPaired ? chalk.green('Yes') : chalk.yellow('No')}`);
-
-      if (status.isPaired) {
-        config.userId = status.userId;
-        config.pairedAt = config.pairedAt || new Date().toISOString();
-        console.log(`  User ID:     ${chalk.cyan(status.userId)}`);
-      }
-
-      if (wsClient.isConnected) {
-        console.log(`  WebSocket:   ${chalk.green('Connected')}`);
-      } else {
-        console.log(`  WebSocket:   ${chalk.yellow('Disconnected')}`);
-      }
-    } catch (error: any) {
-      spinner.fail('Failed to check status');
-      console.error(chalk.red(error.message || 'Unknown error'));
+    const localIp = getLocalIp();
+    console.log(chalk.bold('\nDevice Status:'));
+    console.log(`  Device ID:   ${chalk.cyan(config.deviceId)}`);
+    console.log(`  Device Name: ${chalk.cyan(config.deviceName)}`);
+    console.log(`  Paired:      ${config.isPaired ? chalk.green('Yes') : chalk.yellow('No')}`);
+    console.log(`  Relay URL:   ${chalk.cyan(`ws://${localIp}:${config.relayPort}`)}`);
+    console.log(`  Mobile:      ${wsClient.isConnected ? chalk.green('Connected') : chalk.yellow('Not connected')}`);
+    if (config.pairedAt) {
+      console.log(`  Paired At:   ${chalk.dim(config.pairedAt)}`);
     }
   });
 
@@ -220,6 +212,13 @@ program
       }
     }
 
+    // Start embedded relay server before entering connection flow
+    const localIp = getLocalIp();
+    const relayUrl = `ws://${localIp}:${config.relayPort}`;
+    await wsClient.startServer(config.relayPort);
+    console.log(chalk.cyan(`Relay server started on ${relayUrl}`));
+    console.log(chalk.dim('Waiting for mobile app to connect...\n'));
+
     await startConnection();
   });
 
@@ -235,7 +234,6 @@ program
       try { await disableStartup(); } catch {}
     }
 
-    config.userId = null;
     config.pairedAt = null;
     config.pairingCode = null;
 
@@ -410,27 +408,19 @@ program
     }
   });
 
-// Helper function to start connection and set up event handlers
+// Helper function to set up event handlers (server already started by caller)
 async function startConnection(): Promise<void> {
-  const spinner = createSpinner('Connecting to ForkOff...').start();
+  const spinner = createSpinner('Initializing...').start();
 
   try {
-    await wsClient.connect();
     PermissionIpcManager.cleanupStaleTempFiles();
-    spinner.succeed('Connected to ForkOff!\n');
+    spinner.succeed('Ready!\n');
 
-    // Detect and report connected tools
+    // Detect connected tools
     spinner.start('Detecting AI coding tools...');
     try {
       const toolResult = await toolDetector.detectAll();
       if (toolResult.tools.length > 0) {
-        const toolsToReport = toolResult.tools.map(tool => ({
-          type: tool.type,
-          name: tool.name,
-          version: tool.version || null,
-        }));
-
-        await api.reportConnectedTools(config.deviceId!, toolsToReport);
         spinner.succeed(`Detected ${toolResult.tools.length} AI tool(s): ${toolResult.tools.map(t => t.name).join(', ')}`);
       } else {
         spinner.info('No AI coding tools detected');
@@ -454,7 +444,7 @@ async function startConnection(): Promise<void> {
 
     // When a session is auto-created (command received before terminal_create), send the cwd
     terminalManager.on('session_created', (data) => {
-      console.log(chalk.dim(`[Terminal] Session auto-created: ${data.terminalSessionId} at ${data.cwd}`));
+      console.log(chalk.dim(`[Terminal] Session auto-created: ${data.terminalSessionId}`));
       wsClient.sendTerminalCwd({
         terminalSessionId: data.terminalSessionId,
         cwd: data.cwd,
@@ -481,7 +471,7 @@ async function startConnection(): Promise<void> {
         cwd: session.cwd,
       });
 
-      console.log(chalk.dim(`[Terminal] Session created with cwd: ${session.cwd}`));
+      console.log(chalk.dim(`[Terminal] Session created`));
     });
 
     // Set up event handlers
@@ -519,12 +509,12 @@ async function startConnection(): Promise<void> {
 
       // Attach event listeners BEFORE starting to watch (so we catch initial events)
       claudeSessionDetector.on('session_detected', (session) => {
-        console.log(chalk.cyan(`[Claude] New session detected: ${session.directory}`));
+        console.log(chalk.cyan(`[Claude] New session detected`));
         wsClient.sendClaudeSessionUpdate(session);
       });
 
       claudeSessionDetector.on('session_changed', (session) => {
-        console.log(chalk.dim(`[Claude] Session updated: ${session.directory} (${session.state})`));
+        console.log(chalk.dim(`[Claude] Session updated (${session.state})`));
         wsClient.sendClaudeSessionUpdate(session);
       });
 
@@ -567,16 +557,16 @@ async function startConnection(): Promise<void> {
 
     // Log approval events
     approvalManager.on('approved', (approval) => {
-      console.log(chalk.green(`[Approval] Approved: ${approval.description}`));
+      console.log(chalk.green(`[Approval] Approved: ${approval.approvalId}`));
     });
 
     approvalManager.on('rejected', (approval) => {
-      console.log(chalk.red(`[Approval] Rejected: ${approval.description}`));
+      console.log(chalk.red(`[Approval] Rejected: ${approval.approvalId}`));
     });
 
     // Handle Claude start session request from mobile
     wsClient.on('claude_start_session', async (data: any) => {
-      console.log(chalk.cyan(`[Claude] Start session request: ${data.directory}`));
+      console.log(chalk.cyan(`[Claude] Start session request for ${data.terminalSessionId}`));
       try {
         const result = await claudeProcessManager.startSession(data.directory, data.terminalSessionId, data.dangerouslySkipPermissions, data.interactivePermissions);
 
@@ -600,14 +590,14 @@ async function startConnection(): Promise<void> {
     // Claude is only spawned when the user actually sends a message (via user_message event)
     // This prevents duplicate transcript entries from double spawns
     wsClient.on('claude_resume_session', async (data: any) => {
-      console.log(chalk.cyan(`[Claude] Resume session request: ${data.sessionKey} in ${data.directory}`));
+      console.log(chalk.cyan(`[Claude] Resume session request`));
 
       // Look up the correct directory from our locally scanned sessions
       // The mobile app may have a cached/stale directory (e.g. with corrupted hyphens)
       let resolvedDir = data.directory;
       const knownSession = claudeSessionDetector.getSessions().find(s => s.sessionKey === data.sessionKey);
       if (knownSession && knownSession.directory) {
-        console.log(chalk.dim(`[Claude] Using local directory for session: ${knownSession.directory}`));
+        console.log(chalk.dim(`[Claude] Using local directory for session`));
         resolvedDir = knownSession.directory;
       }
 
@@ -651,7 +641,7 @@ async function startConnection(): Promise<void> {
         event: { type: 'ready' },
       });
 
-      console.log(chalk.green(`[Claude] Session ready (will spawn on first message): ${data.sessionKey}`));
+      console.log(chalk.green(`[Claude] Session ready (will spawn on first message)`));
     });
 
     // Handle directory listing requests
@@ -669,8 +659,10 @@ async function startConnection(): Promise<void> {
 
         // SECURITY: Only allow access to directories under home directory
         // This prevents accessing sensitive system files like /etc/passwd
-        if (!resolvedPath.startsWith(homeDir)) {
-          console.warn(chalk.yellow(`[Dir] Access denied - path outside home directory: ${resolvedPath}`));
+        // Uses path.relative() for cross-platform safety (handles Windows case-insensitivity)
+        const dirRelative = path.relative(homeDir, resolvedPath);
+        if (dirRelative.startsWith('..') || path.isAbsolute(dirRelative)) {
+          console.warn(chalk.yellow(`[Dir] Access denied — path outside home directory`));
           wsClient.sendDirectoryListResponse({ requestId: data.requestId, entries: [], currentPath: data.path });
           return;
         }
@@ -696,14 +688,14 @@ async function startConnection(): Promise<void> {
 
     // Handle read file requests from mobile (e.g., CLAUDE.md)
     wsClient.on('read_file', async (data: any) => {
-      console.log(chalk.dim(`[File] Read request: ${data.filePath}`));
+      console.log(chalk.dim(`[File] Read request received`));
       try {
         // SECURITY: Whitelist of allowed filenames
         const allowedFiles = ['CLAUDE.md', 'README.md', 'package.json'];
         const fileName = path.basename(data.filePath);
 
         if (!allowedFiles.includes(fileName)) {
-          console.warn(chalk.yellow(`[File] Access denied - file not in whitelist: ${fileName}`));
+          console.warn(chalk.yellow(`[File] Access denied — file not in whitelist`));
           wsClient.sendReadFileResponse({
             requestId: data.requestId,
             exists: false,
@@ -721,14 +713,16 @@ async function startConnection(): Promise<void> {
         resolvedPath = path.resolve(resolvedPath);
 
         // SECURITY: Only allow access under home directory
+        // Uses path.relative() for cross-platform safety (handles Windows case-insensitivity)
         const homeDir = os.homedir();
-        if (!resolvedPath.startsWith(homeDir)) {
-          console.warn(chalk.yellow(`[File] Access denied - path outside home directory: ${resolvedPath}`));
+        const fileRelative = path.relative(homeDir, resolvedPath);
+        if (fileRelative.startsWith('..') || path.isAbsolute(fileRelative)) {
+          console.warn(chalk.yellow(`[File] Access denied — path outside home directory`));
           wsClient.sendReadFileResponse({
             requestId: data.requestId,
             exists: false,
             fileName,
-            error: 'Path outside home directory',
+            error: 'Access denied',
           });
           return;
         }
@@ -763,22 +757,31 @@ async function startConnection(): Promise<void> {
           fileName,
         });
       } catch (error: any) {
-        console.error(chalk.red(`[File] Error: ${error.message}`));
+        console.error(`[File] Error reading ${path.basename(data.filePath)}:`, error.message);
         wsClient.sendReadFileResponse({
           requestId: data.requestId,
           exists: false,
           fileName: path.basename(data.filePath),
-          error: error.message,
+          error: 'File read failed',
         });
       }
     });
 
     // Handle transcript fetch requests from mobile
     wsClient.on('transcript_fetch', async (data: any) => {
-      console.log(chalk.dim(`[Transcript] Fetching: ${data.sessionKey}, offset: ${data.offset}, limit: ${data.limit}, reverse: ${data.reverse}`));
+      console.log(chalk.dim(`[Transcript] Fetching: offset: ${data.offset}, limit: ${data.limit}`));
       try {
+        // SECURITY: Validate transcript path is under ~/.claude/projects/ to prevent path traversal
+        const resolvedTranscriptPath = path.resolve(data.transcriptPath);
+        const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
+        const relPath = path.relative(claudeProjectsDir, resolvedTranscriptPath);
+        if (relPath.startsWith('..') || path.isAbsolute(relPath)) {
+          console.warn(chalk.yellow(`[Transcript] Access denied — path outside ~/.claude/projects/`));
+          return;
+        }
+
         const result = await transcriptStreamer.fetchHistory(
-          data.transcriptPath,
+          resolvedTranscriptPath,
           data.offset || 0,
           data.limit || 100,
           data.reverse !== false // Default to true (most recent first)
@@ -798,31 +801,22 @@ async function startConnection(): Promise<void> {
 
     // Handle transcript subscribe
     wsClient.on('transcript_subscribe', (data: any) => {
-      console.log(chalk.dim(`[Transcript] Subscribing: ${data.sessionKey}`));
-      transcriptStreamer.subscribeToUpdates(data.sessionKey, data.transcriptPath);
+      console.log(chalk.dim(`[Transcript] Subscribing to session`));
+      // SECURITY: Validate transcript path to prevent path traversal
+      const resolvedSubPath = path.resolve(data.transcriptPath);
+      const claudeDir = path.join(os.homedir(), '.claude', 'projects');
+      const subRelPath = path.relative(claudeDir, resolvedSubPath);
+      if (subRelPath.startsWith('..') || path.isAbsolute(subRelPath)) {
+        console.warn(chalk.yellow(`[Transcript] Subscribe denied — path outside ~/.claude/projects/`));
+        return;
+      }
+      transcriptStreamer.subscribeToUpdates(data.sessionKey, resolvedSubPath);
     });
 
     // Handle transcript unsubscribe
     wsClient.on('transcript_unsubscribe', (data: any) => {
-      console.log(chalk.dim(`[Transcript] Unsubscribing: ${data.sessionKey}`));
+      console.log(chalk.dim(`[Transcript] Unsubscribing from session`));
       transcriptStreamer.unsubscribeFromUpdates(data.sessionKey);
-    });
-
-    // Handle SDK subscribe start - mobile wants live updates for a session
-    // This is sent by API when mobile uses transcript_subscribe_sdk
-    wsClient.on('transcript_subscribe_sdk_start', async (data: any) => {
-      console.log(chalk.cyan(`[Transcript] SDK subscribe start: ${data.sessionKey}`));
-
-      // Find the transcript file for this session
-      const sessions = claudeSessionDetector.scanSessions();
-      const session = sessions.find(s => s.sessionKey === data.sessionKey);
-
-      if (session?.transcriptPath) {
-        console.log(chalk.dim(`[Transcript] Starting watch for: ${session.transcriptPath}`));
-        transcriptStreamer.subscribeToUpdates(data.sessionKey, session.transcriptPath);
-      } else {
-        console.log(chalk.yellow(`[Transcript] No transcript found for session: ${data.sessionKey}`));
-      }
     });
 
     // Handle claude sessions request - mobile app wants current sessions
@@ -849,128 +843,6 @@ async function startConnection(): Promise<void> {
 
         // Send tool status
         wsClient.sendToolStatusUpdate('claude_code', hasActiveSession ? 'active' : 'inactive');
-      }
-    });
-
-    // Handle RPC requests from the API gateway
-    wsClient.on('rpc_request', async (data: { requestId: string; method: string; params: any }) => {
-      console.log(chalk.cyan(`[RPC] Request: ${data.method}, requestId: ${data.requestId}`));
-
-      try {
-        if (data.method === 'get_session_history') {
-          const { claudeSessionId, sessionKey, directory, limit = 400, offset = 0 } = data.params;
-          console.log(chalk.dim(`[RPC] get_session_history request received`));
-
-          // Find the transcript file
-          let transcriptPath: string | undefined;
-
-          // If claudeSessionId is provided, search for the JSONL file directly
-          if (claudeSessionId) {
-            // SECURITY: Validate claudeSessionId to prevent path traversal
-            // Session IDs should be alphanumeric with hyphens/underscores only
-            const sessionIdRegex = /^[a-zA-Z0-9_-]+$/;
-            if (!sessionIdRegex.test(claudeSessionId)) {
-              console.warn(chalk.yellow(`[RPC] Invalid claudeSessionId format - rejected`));
-              wsClient.sendRpcResponse({
-                requestId: data.requestId,
-                error: { code: -32602, message: 'Invalid session ID format' }
-              });
-              return;
-            }
-
-            const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
-            if (fs.existsSync(claudeProjectsDir)) {
-              const projectDirs = fs.readdirSync(claudeProjectsDir);
-              for (const projectDir of projectDirs) {
-                // SECURITY: Validate projectDir as well to prevent traversal
-                if (!sessionIdRegex.test(projectDir) && !/^[a-zA-Z0-9_.-]+$/.test(projectDir)) {
-                  continue;
-                }
-                const potentialPath = path.join(claudeProjectsDir, projectDir, `${claudeSessionId}.jsonl`);
-                // SECURITY: Verify the resolved path is still under claudeProjectsDir
-                const resolvedPotentialPath = path.resolve(potentialPath);
-                if (!resolvedPotentialPath.startsWith(claudeProjectsDir)) {
-                  continue;
-                }
-                if (fs.existsSync(potentialPath)) {
-                  transcriptPath = potentialPath;
-                  console.log(chalk.dim(`[RPC] Found JSONL transcript`));
-                  break;
-                }
-              }
-            }
-          }
-
-          // If not found by claudeSessionId, search all sessions
-          if (!transcriptPath && claudeSessionDetector.isClaudeInstalled()) {
-            const sessions = claudeSessionDetector.scanSessions();
-
-            // First try to match by sessionKey
-            let session = sessions.find(s => s.sessionKey === sessionKey);
-
-            // If no match by sessionKey, try to find most recent session for the same directory
-            if (!session && sessions.length > 0 && directory) {
-              const normalizedDir = path.resolve(directory);
-              session = sessions.find(s => path.resolve(s.directory) === normalizedDir);
-              if (session) {
-                console.log(chalk.dim(`[RPC] Using directory-matched session as fallback: ${session.sessionKey}`));
-              } else {
-                console.log(chalk.dim(`[RPC] No session found for directory: ${normalizedDir}`));
-              }
-            }
-
-            if (session?.transcriptPath) {
-              transcriptPath = session.transcriptPath;
-              console.log(chalk.dim(`[RPC] Found transcript path: ${transcriptPath}`));
-            }
-          }
-
-          if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-            console.log(chalk.yellow(`[RPC] No transcript file found for session`));
-            wsClient.sendRpcResponse({
-              requestId: data.requestId,
-              result: { entries: [], totalEntries: 0, hasMore: false }
-            });
-            return;
-          }
-
-          // Read the transcript file
-          const result = await transcriptStreamer.fetchHistory(transcriptPath, offset, limit, true);
-          console.log(chalk.green(`[RPC] Loaded ${result.entries.length} entries from transcript`));
-
-          // IMPORTANT: Start watching this transcript for live updates
-          // This is needed because SDK mode doesn't send transcript_subscribe
-          // Use sessionKey from mobile for updates (must match what mobile is listening for)
-          const updateSessionKey = sessionKey;
-          if (!updateSessionKey) {
-            console.log(chalk.yellow(`[RPC] No sessionKey provided, using claudeSessionId - updates may not route correctly`));
-          }
-          const watchKey = updateSessionKey || claudeSessionId || data.requestId;
-          console.log(chalk.cyan(`[RPC] Starting file watch for live updates: ${watchKey}`));
-          transcriptStreamer.subscribeToUpdates(watchKey, transcriptPath);
-
-          wsClient.sendRpcResponse({
-            requestId: data.requestId,
-            result: {
-              entries: result.entries,
-              totalEntries: result.totalEntries,
-              hasMore: result.hasMore,
-              sessionKey: watchKey, // Tell mobile which sessionKey to listen for updates
-            }
-          });
-        } else {
-          console.log(chalk.yellow(`[RPC] Unknown method: ${data.method}`));
-          wsClient.sendRpcResponse({
-            requestId: data.requestId,
-            error: { code: -32601, message: `Method not found: ${data.method}` }
-          });
-        }
-      } catch (error: any) {
-        console.error(chalk.red(`[RPC] Error handling ${data.method}:`, error.message));
-        wsClient.sendRpcResponse({
-          requestId: data.requestId,
-          error: { code: -32603, message: error.message || 'Internal error' }
-        });
       }
     });
 
@@ -1007,7 +879,7 @@ async function startConnection(): Promise<void> {
 
     // Forward tool activity events to mobile (non-blocking notifications)
     claudeProcessManager.on('tool_activity', (data: any) => {
-      console.log(chalk.dim(`[Claude] Tool activity: ${data.toolName} - ${data.inputSummary?.substring(0, 60)}`));
+      console.log(chalk.dim(`[Claude] Tool activity: ${data.toolName}`));
       wsClient.sendToolActivity(data);
     });
 
@@ -1025,7 +897,7 @@ async function startConnection(): Promise<void> {
 
     // Handle permission responses from mobile → route back to hook IPC
     wsClient.on('permission_response', (data: any) => {
-      console.log(chalk.green(`[Claude] Permission response: ${data.promptId} -> ${data.decision}`));
+      console.log(chalk.green(`[Claude] Permission response: ${data.promptId}`));
       claudeProcessManager.handlePermissionResponse(data.promptId, data.decision, data.reason);
     });
 
@@ -1037,17 +909,9 @@ async function startConnection(): Promise<void> {
       }
     });
 
-    // Handle mobile disconnect — full reset: clear taken-over, auto-allow pending, tear down hooks
-    wsClient.on('mobile_disconnected', () => {
-      console.log(chalk.yellow(`[Claude] Mobile disconnected — full permission reset`));
-      claudeProcessManager.clearAllTakenOver();
-      claudeProcessManager.autoAllowAllPendingPrompts();
-      claudeProcessManager.cleanupAllPermissionState();
-    });
-
     // Handle Claude approval responses from mobile
     wsClient.on('claude_approval_response', (data: any) => {
-      console.log(chalk.green(`[Claude] Approval response: ${data.approvalId} -> ${data.response}`));
+      console.log(chalk.green(`[Claude] Approval response: ${data.approvalId}`));
       claudeProcessManager.handleApprovalResponse(data.approvalId, data.response);
     });
 
@@ -1069,7 +933,7 @@ async function startConnection(): Promise<void> {
       if (!claudeProcessManager.isTakenOver(terminalSessionId)) {
         // Fresh session from auto-prompt (quick action): start new session with directory
         if (data.directory) {
-          console.log(chalk.cyan(`[Claude] Starting fresh session for auto-prompt in ${data.directory}`));
+          console.log(chalk.cyan(`[Claude] Starting fresh session for auto-prompt`));
           const sent = await claudeProcessManager.startAndSendMessage(data.directory, terminalSessionId, data.message, data.mode?.permissionMode === 'bypassPermissions', data.interactivePermissions);
           if (sent) {
             // Notify mobile that session is ready
@@ -1126,7 +990,7 @@ async function startConnection(): Promise<void> {
     // Forward thinking content to mobile
     claudeProcessManager.on('thinking_content', (data: any) => {
       if (data.content || !data.partial) {
-        console.log(chalk.magenta(`[Claude] Thinking${data.partial ? ' (streaming)' : ' (complete)'}: ${data.content?.substring(0, 50) || '...'}`));
+        console.log(chalk.magenta(`[Claude] Thinking${data.partial ? ' (streaming)' : ' (complete)'}: ${data.content?.length || 0} chars`));
       }
       wsClient.sendThinkingContent({
         sessionKey: data.sessionKey,
@@ -1151,13 +1015,13 @@ async function startConnection(): Promise<void> {
     // creates a new Claude session with a new transcript file.
     claudeProcessManager.on('session_id_captured', (data: any) => {
       const { terminalSessionId, sessionId } = data;
-      console.log(chalk.green(`[Claude] New session_id captured for ${terminalSessionId}: ${sessionId}`));
+      console.log(chalk.green(`[Claude] New session_id captured for ${terminalSessionId}`));
 
       // Re-scan to pick up the new session's transcript path
       const sessions = claudeSessionDetector.scanSessions();
       const newSession = sessions.find((s: any) => s.sessionKey === sessionId);
       if (newSession?.transcriptPath) {
-        console.log(chalk.green(`[Claude] Updating transcript watcher → ${newSession.transcriptPath}`));
+        console.log(chalk.green(`[Claude] Updating transcript watcher`));
         transcriptStreamer.subscribeToUpdates(terminalSessionId, newSession.transcriptPath);
       } else {
         console.log(chalk.yellow(`[Claude] New session transcript not found yet, retrying in 1s...`));
@@ -1165,10 +1029,10 @@ async function startConnection(): Promise<void> {
           const retrySessions = claudeSessionDetector.scanSessions();
           const retrySession = retrySessions.find((s: any) => s.sessionKey === sessionId);
           if (retrySession?.transcriptPath) {
-            console.log(chalk.green(`[Claude] Retry: updating transcript watcher → ${retrySession.transcriptPath}`));
+            console.log(chalk.green(`[Claude] Retry: updating transcript watcher`));
             transcriptStreamer.subscribeToUpdates(terminalSessionId, retrySession.transcriptPath);
           } else {
-            console.log(chalk.yellow(`[Claude] Retry: still not found for ${sessionId}`));
+            console.log(chalk.yellow(`[Claude] Retry: transcript still not found`));
           }
         }, 1000);
       }
@@ -1179,7 +1043,7 @@ async function startConnection(): Promise<void> {
       if (data.type === 'list') {
         console.log(chalk.cyan(`[Claude] Task list: ${data.tasks?.length || 0} tasks`));
       } else {
-        console.log(chalk.cyan(`[Claude] Task ${data.type}: ${data.task?.subject || data.task?.id}`));
+        console.log(chalk.cyan(`[Claude] Task ${data.type}: ${data.task?.id || 'unknown'}`));
       }
       wsClient.sendTaskProgress({
         sessionKey: data.sessionKey,
@@ -1190,10 +1054,8 @@ async function startConnection(): Promise<void> {
     });
 
     wsClient.on('disconnected', (reason) => {
-      console.log(chalk.yellow(`\nDisconnected: ${reason}`));
-      if (reason !== 'io client disconnect') {
-        console.log(chalk.dim('Attempting to reconnect...'));
-      }
+      console.log(chalk.yellow(`\nMobile disconnected: ${reason}`));
+      console.log(chalk.dim('Waiting for mobile to reconnect...'));
     });
 
     wsClient.on('error', (error) => {
@@ -1206,6 +1068,12 @@ async function startConnection(): Promise<void> {
       claudeSessionDetector.stopWatching();
       transcriptStreamer.cleanup();
       wsClient.disconnect();
+      const logPath = getLogFilePath();
+      closeDebugLog();
+      if (logPath) {
+        // Use original console since we just closed the debug log
+        process.stdout.write(`\nDebug log saved: ${logPath}\n`);
+      }
       process.exit(0);
     });
 
@@ -1217,37 +1085,68 @@ async function startConnection(): Promise<void> {
   }
 }
 
-// Helper function to wait for pairing
-async function waitForPairing(deviceId: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const checkInterval = setInterval(async () => {
-      try {
-        const status = await api.checkPairingStatus(deviceId);
-
-        if (status.isPaired) {
-          clearInterval(checkInterval);
-          config.userId = status.userId;
-          config.pairedAt = new Date().toISOString();
-
-          console.log(chalk.green('\n✓ Device paired successfully!'));
-          console.log(chalk.dim('\nConnecting to receive commands...\n'));
-
-          // Auto-connect after successful pairing
-          resolve();
-        }
-      } catch (error) {
-        // Continue waiting
-      }
-    }, 2000);
+// Helper function to wait for pairing via WebSocket event
+async function waitForPairing(): Promise<{ mobileDeviceId: string }> {
+  return new Promise((resolve) => {
+    wsClient.on('pair_device', (data: any) => {
+      resolve({ mobileDeviceId: data.mobileDeviceId });
+    });
 
     // Handle Ctrl+C
     process.on('SIGINT', () => {
-      clearInterval(checkInterval);
       console.log(chalk.yellow('\nPairing cancelled.'));
+      wsClient.disconnect();
       process.exit(0);
     });
   });
 }
+
+// Logs command — list and manage debug log files
+program
+  .command('logs')
+  .description('List debug log files for troubleshooting')
+  .option('--clean', 'Delete all debug log files')
+  .option('--latest', 'Print path to the most recent log file')
+  .action((options) => {
+    const logDir = path.join(os.homedir(), '.forkoff-cli', 'logs');
+    if (!fs.existsSync(logDir)) {
+      console.log(chalk.dim('No debug logs found. Run with --debug to generate logs.'));
+      return;
+    }
+
+    const logFiles = fs.readdirSync(logDir)
+      .filter(f => f.startsWith('debug-') && f.endsWith('.log'))
+      .sort()
+      .reverse();
+
+    if (logFiles.length === 0) {
+      console.log(chalk.dim('No debug logs found. Run with --debug to generate logs.'));
+      return;
+    }
+
+    if (options.clean) {
+      for (const file of logFiles) {
+        try { fs.unlinkSync(path.join(logDir, file)); } catch {}
+      }
+      console.log(chalk.green(`Deleted ${logFiles.length} log file(s).`));
+      return;
+    }
+
+    if (options.latest) {
+      console.log(path.join(logDir, logFiles[0]));
+      return;
+    }
+
+    console.log(chalk.bold('Debug log files:\n'));
+    for (const file of logFiles) {
+      const filePath = path.join(logDir, file);
+      const stat = fs.statSync(filePath);
+      const sizeKB = (stat.size / 1024).toFixed(1);
+      console.log(`  ${file}  ${chalk.dim(`(${sizeKB} KB)`)}`);
+    }
+    console.log(chalk.dim(`\nLog directory: ${logDir}`));
+    console.log(chalk.dim('Run with --debug to generate a new log file.'));
+  });
 
 // Help command
 program

@@ -1,280 +1,136 @@
 /**
- * Tests for WebSocketClient reconnection resilience
+ * Tests for WebSocketClient with embedded relay server
  *
  * Verifies:
- * - Socket.io configured with Infinity reconnectionAttempts, 30s max delay, 0.5 randomization
- * - Immediate heartbeat sent after reconnect (when reconnectAttempts > 0)
- * - 'reconnecting' event emitted with attempt count on connect_error
- * - 'reconnected' event emitted with total attempts on successful reconnect
- * - Initial connect times out after 30s
- * - Disconnect reason logged
+ * - Server starts and listens on specified port
+ * - Mobile connections are accepted/rejected based on auth
+ * - Events are forwarded from server to WebSocketClient EventEmitter
+ * - isConnected reflects mobile connection state
+ * - Pairing code validation works in-process
+ * - Heartbeat sent to connected mobile
+ * - Device registration required before starting server
  */
 
-// Build a mock socket with handler tracking
-const mockHandlers = new Map<string, Function[]>();
-const mockSocket = {
-  connected: false,
-  id: 'mock-socket-id',
-  on: jest.fn((event: string, handler: Function) => {
-    if (!mockHandlers.has(event)) {
-      mockHandlers.set(event, []);
-    }
-    mockHandlers.get(event)!.push(handler);
-    return mockSocket;
-  }),
-  onAny: jest.fn(),
-  emit: jest.fn(),
-  disconnect: jest.fn(),
+// Mock the server module
+const mockServer = {
+  start: jest.fn().mockResolvedValue(undefined),
+  stop: jest.fn().mockResolvedValue(undefined),
+  setPairingCode: jest.fn(),
+  emitToMobile: jest.fn(),
+  hasMobileConnection: jest.fn().mockReturnValue(false),
+  getMobileDeviceId: jest.fn().mockReturnValue(null),
+  on: jest.fn(),
+  removeAllListeners: jest.fn(),
 };
 
-jest.mock('socket.io-client', () => ({
-  io: jest.fn(() => mockSocket),
+jest.mock('../server', () => ({
+  EmbeddedRelayServer: jest.fn(() => mockServer),
 }));
 
 jest.mock('../config', () => ({
   config: {
     deviceId: 'test-device-id',
-    wsUrl: 'ws://localhost:3000',
-    userId: 'test-user-id',
+    deviceName: 'test-device',
+    relayPort: 3000,
   },
 }));
 
-// Mock package.json for cliVersion
-jest.mock('../../package.json', () => ({ version: '1.0.0-test' }), { virtual: true });
+// Mock E2EE to avoid real crypto
+jest.mock('../crypto/e2eeManager', () => ({
+  E2EEManager: jest.fn(() => ({
+    initialize: jest.fn().mockResolvedValue(undefined),
+    listPersistedDevices: jest.fn().mockReturnValue([]),
+    restorePersistedSession: jest.fn().mockResolvedValue(false),
+    hasSessionKey: jest.fn().mockReturnValue(false),
+    cleanup: jest.fn(),
+  })),
+}));
 
 import { WebSocketClient } from '../websocket';
-const { io: mockIo } = jest.requireMock('socket.io-client');
 
-function triggerSocketEvent(event: string, ...args: unknown[]) {
-  const handlers = mockHandlers.get(event) || [];
-  handlers.forEach((h) => h(...args));
-}
-
-describe('WebSocketClient - Reconnection Resilience', () => {
+describe('WebSocketClient - Embedded Server Mode', () => {
   let wsClient: WebSocketClient;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    jest.useFakeTimers();
-    mockHandlers.clear();
-    mockSocket.connected = false;
     wsClient = new WebSocketClient();
-    // Prevent Node.js EventEmitter from throwing on unhandled 'error' events
+    // Prevent unhandled 'error' event throws
     wsClient.on('error', () => {});
   });
 
   afterEach(() => {
-    jest.useRealTimers();
     wsClient.disconnect();
   });
 
-  describe('Socket.io configuration', () => {
-    it('should configure infinite reconnection attempts', () => {
-      // Start connect (don't await — we just need the io() call)
-      wsClient.connect();
-
-      expect(mockIo).toHaveBeenCalledWith(
-        'ws://localhost:3000',
-        expect.objectContaining({
-          reconnectionAttempts: Infinity,
-        }),
-      );
+  describe('Server startup', () => {
+    it('should start the embedded relay server on specified port', async () => {
+      await wsClient.startServer(3000);
+      expect(mockServer.start).toHaveBeenCalled();
     });
 
-    it('should configure 30s max reconnection delay', () => {
-      wsClient.connect();
-
-      expect(mockIo).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({
-          reconnectionDelayMax: 30000,
-        }),
-      );
-    });
-
-    it('should configure 0.5 randomization factor', () => {
-      wsClient.connect();
-
-      expect(mockIo).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({
-          randomizationFactor: 0.5,
-        }),
-      );
-    });
-
-    it('should use websocket transport only', () => {
-      wsClient.connect();
-
-      expect(mockIo).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({
-          transports: ['websocket'],
-        }),
-      );
-    });
-
-    it('should enable reconnection', () => {
-      wsClient.connect();
-
-      expect(mockIo).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({
-          reconnection: true,
-        }),
-      );
-    });
-  });
-
-  describe('Reconnect behavior', () => {
-    it('should send immediate heartbeat after reconnect', () => {
-      wsClient.connect();
-
-      // Simulate connect_error to increment reconnectAttempts
-      triggerSocketEvent('connect_error', new Error('connection failed'));
-
-      // Clear previous emit calls
-      mockSocket.emit.mockClear();
-
-      // Simulate successful reconnect
-      mockSocket.connected = true;
-      triggerSocketEvent('connect');
-
-      // Should have sent a heartbeat immediately on reconnect
-      expect(mockSocket.emit).toHaveBeenCalledWith('device_heartbeat', { status: 'online' });
-    });
-
-    it('should NOT send immediate heartbeat on first connect', () => {
-      wsClient.connect();
-
-      mockSocket.emit.mockClear();
-
-      // Simulate first connection (no prior connect_errors)
-      mockSocket.connected = true;
-      triggerSocketEvent('connect');
-
-      // device_heartbeat should NOT be called immediately (only via startHeartbeat interval)
-      const heartbeatCalls = mockSocket.emit.mock.calls.filter(
-        (call) => call[0] === 'device_heartbeat',
-      );
-      expect(heartbeatCalls.length).toBe(0);
-    });
-
-    it('should emit "reconnected" event with attempt count on successful reconnect', () => {
-      const reconnectedSpy = jest.fn();
-      wsClient.on('reconnected', reconnectedSpy);
-
-      wsClient.connect();
-
-      // Simulate 3 connect_errors
-      triggerSocketEvent('connect_error', new Error('fail 1'));
-      triggerSocketEvent('connect_error', new Error('fail 2'));
-      triggerSocketEvent('connect_error', new Error('fail 3'));
-
-      // Simulate successful reconnect
-      mockSocket.connected = true;
-      triggerSocketEvent('connect');
-
-      expect(reconnectedSpy).toHaveBeenCalledWith({ attempts: 3 });
-    });
-
-    it('should emit "reconnecting" event with attempt count on connect_error', () => {
-      const reconnectingSpy = jest.fn();
-      wsClient.on('reconnecting', reconnectingSpy);
-
-      wsClient.connect();
-
-      triggerSocketEvent('connect_error', new Error('network error'));
-
-      expect(reconnectingSpy).toHaveBeenCalledWith({ attempt: 1 });
-
-      triggerSocketEvent('connect_error', new Error('network error again'));
-
-      expect(reconnectingSpy).toHaveBeenCalledWith({ attempt: 2 });
-    });
-
-    it('should reset reconnectAttempts to 0 after successful reconnect', () => {
-      const reconnectedSpy = jest.fn();
-      wsClient.on('reconnected', reconnectedSpy);
-
-      wsClient.connect();
-
-      // Simulate errors then reconnect
-      triggerSocketEvent('connect_error', new Error('fail'));
-      triggerSocketEvent('connect_error', new Error('fail'));
-      mockSocket.connected = true;
-      triggerSocketEvent('connect');
-
-      expect(reconnectedSpy).toHaveBeenCalledWith({ attempts: 2 });
-      reconnectedSpy.mockClear();
-
-      // Simulate another disconnect/reconnect cycle
-      triggerSocketEvent('connect_error', new Error('fail again'));
-      triggerSocketEvent('connect');
-
-      // Should be 1, not 3 (because counter was reset)
-      expect(reconnectedSpy).toHaveBeenCalledWith({ attempts: 1 });
-    });
-  });
-
-  describe('Initial connect timeout', () => {
-    it('should reject after 30 seconds if initial connection fails', async () => {
-      const connectPromise = wsClient.connect();
-
-      // Advance past the 30s timeout
-      jest.advanceTimersByTime(30000);
-
-      await expect(connectPromise).rejects.toThrow('Initial connection timed out after 30 seconds');
-    });
-
-    it('should resolve if connect happens before timeout', async () => {
-      const connectPromise = wsClient.connect();
-
-      // Simulate connect within timeout
-      mockSocket.connected = true;
-      triggerSocketEvent('connect');
-
-      await expect(connectPromise).resolves.toBeUndefined();
-    });
-  });
-
-  describe('Disconnect handling', () => {
-    it('should emit disconnected event with reason', () => {
-      const disconnectedSpy = jest.fn();
-      wsClient.on('disconnected', disconnectedSpy);
-
-      wsClient.connect();
-
-      triggerSocketEvent('disconnect', 'transport close');
-
-      expect(disconnectedSpy).toHaveBeenCalledWith('transport close');
-    });
-
-    it('should emit error on connect_error', () => {
-      const errorSpy = jest.fn();
-      wsClient.on('error', errorSpy);
-
-      wsClient.connect();
-
-      const testError = new Error('connection refused');
-      triggerSocketEvent('connect_error', testError);
-
-      expect(errorSpy).toHaveBeenCalledWith(testError);
-    });
-  });
-
-  describe('Device registration rejection', () => {
-    it('should reject connect if no deviceId is configured', async () => {
-      // Override config to have no deviceId
+    it('should reject if no deviceId is configured', async () => {
       const configModule = jest.requireMock('../config');
       const originalDeviceId = configModule.config.deviceId;
       configModule.config.deviceId = '';
 
       const freshClient = new WebSocketClient();
-      await expect(freshClient.connect()).rejects.toThrow('Device not registered');
+      await expect(freshClient.startServer(3000)).rejects.toThrow('Device not registered');
 
-      // Restore
       configModule.config.deviceId = originalDeviceId;
+    });
+  });
+
+  describe('Pairing code', () => {
+    it('should set pairing code on server', async () => {
+      await wsClient.startServer(3000);
+      wsClient.setPairingCode('ABC12345');
+      expect(mockServer.setPairingCode).toHaveBeenCalledWith('ABC12345');
+    });
+  });
+
+  describe('isConnected', () => {
+    it('should return false when no mobile is connected', async () => {
+      await wsClient.startServer(3000);
+      mockServer.hasMobileConnection.mockReturnValue(false);
+      expect(wsClient.isConnected).toBe(false);
+    });
+
+    it('should return true when mobile is connected', async () => {
+      await wsClient.startServer(3000);
+      mockServer.hasMobileConnection.mockReturnValue(true);
+      expect(wsClient.isConnected).toBe(true);
+    });
+
+    it('should return false when server is not started', () => {
+      expect(wsClient.isConnected).toBe(false);
+    });
+  });
+
+  describe('Emit to mobile', () => {
+    it('should send non-sensitive events via emitToMobile', async () => {
+      await wsClient.startServer(3000);
+      wsClient.sendToolStatusUpdate('claude_code', 'active');
+      expect(mockServer.emitToMobile).toHaveBeenCalledWith('tool_status_update', expect.objectContaining({
+        toolType: 'claude_code',
+        status: 'active',
+      }));
+    });
+
+    it('should send heartbeat to mobile', async () => {
+      await wsClient.startServer(3000);
+      wsClient.sendHeartbeat('online');
+      expect(mockServer.emitToMobile).toHaveBeenCalledWith('device_status', {
+        status: 'online',
+        deviceId: 'test-device-id',
+      });
+    });
+  });
+
+  describe('Disconnect', () => {
+    it('should stop the server on disconnect', async () => {
+      await wsClient.startServer(3000);
+      wsClient.disconnect();
+      expect(mockServer.stop).toHaveBeenCalled();
     });
   });
 });

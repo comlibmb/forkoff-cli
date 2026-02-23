@@ -57,7 +57,7 @@ export function createIntegration(): ForkOffIntegration {
       if (!config.isPaired) {
         throw new Error('Device not paired. Run "forkoff pair" and scan the QR code.');
       }
-      await wsClient.connect();
+      await wsClient.startServer(config.relayPort);
     },
 
     disconnect: () => {
@@ -116,5 +116,4 @@ export { wsClient } from './websocket';
 export { approvalManager } from './approval';
 export { terminalManager } from './terminal';
 export { config } from './config';
-export { api } from './api';
 export { claudeSessionDetector } from './tools';

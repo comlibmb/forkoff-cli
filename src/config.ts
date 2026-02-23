@@ -9,17 +9,18 @@ function isLocalUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     const host = parsed.hostname.toLowerCase();
-    return host === 'localhost' ||
-           host === '127.0.0.1' ||
-           host.startsWith('192.168.') ||
-           host.startsWith('10.') ||
-           host.startsWith('172.16.') ||
-           host.startsWith('172.17.') ||
-           host.startsWith('172.18.') ||
-           host.startsWith('172.19.') ||
-           host.startsWith('172.2') ||
-           host.startsWith('172.30.') ||
-           host.startsWith('172.31.');
+    if (host === 'localhost' || host === '127.0.0.1' ||
+        host.startsWith('192.168.') || host.startsWith('10.')) {
+      return true;
+    }
+
+    // Check 172.16.0.0 - 172.31.255.255
+    if (host.startsWith('172.')) {
+      const secondOctet = parseInt(host.split('.')[1], 10);
+      if (secondOctet >= 16 && secondOctet <= 31) return true;
+    }
+
+    return false;
   } catch {
     return false;
   }
@@ -49,6 +50,7 @@ interface DeviceConfig {
   deviceName: string;
   apiUrl: string;
   wsUrl: string;
+  relayPort: number;
   pairingCode: string | null;
   pairedAt: string | null;
   userId: string | null;
@@ -62,6 +64,7 @@ const defaultConfig: DeviceConfig = {
   deviceName: os.hostname(),
   apiUrl: 'https://api.forkoff.app/api',
   wsUrl: 'wss://api.forkoff.app',
+  relayPort: 3000,
   pairingCode: null,
   pairedAt: null,
   userId: null,
@@ -84,7 +87,7 @@ class Config {
       : path.join(os.homedir(), '.config', 'forkoff-cli');
 
     if (!fs.existsSync(configDir)) {
-      fs.mkdirSync(configDir, { recursive: true });
+      fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
     }
 
     return path.join(configDir, 'config.json');
@@ -93,8 +96,22 @@ class Config {
   private load(): DeviceConfig {
     try {
       if (fs.existsSync(this.configPath)) {
-        const content = fs.readFileSync(this.configPath, 'utf-8');
-        return { ...defaultConfig, ...JSON.parse(content) };
+        // SECURITY: Atomic symlink check — open fd then fstat to avoid TOCTOU
+        const fd = fs.openSync(this.configPath, 'r');
+        try {
+          const stat = fs.fstatSync(fd);
+          // If the file was replaced with a symlink between open and fstat,
+          // fstat returns the symlink target info. Check lstat separately.
+          const lstat = fs.lstatSync(this.configPath);
+          if (lstat.isSymbolicLink()) {
+            console.error('[Security] Symlink detected at config file, refusing to read');
+            return { ...defaultConfig };
+          }
+          const content = fs.readFileSync(fd, 'utf-8');
+          return { ...defaultConfig, ...JSON.parse(content) };
+        } finally {
+          fs.closeSync(fd);
+        }
       }
     } catch (error) {
       // If config is corrupted, use defaults
@@ -103,7 +120,18 @@ class Config {
   }
 
   private save(): void {
-    fs.writeFileSync(this.configPath, JSON.stringify(this.data, null, 2));
+    // SECURITY: Atomic write via temp file + rename to prevent TOCTOU
+    const tmpPath = this.configPath + '.tmp.' + process.pid;
+    try {
+      // Write to temp file with restrictive permissions
+      fs.writeFileSync(tmpPath, JSON.stringify(this.data, null, 2), { encoding: 'utf-8', mode: 0o600 });
+      // Atomic rename (same filesystem)
+      fs.renameSync(tmpPath, this.configPath);
+    } catch (err) {
+      // Clean up temp file on error
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      console.error('[Security] Failed to save config:', (err as Error).message);
+    }
   }
 
   get deviceId(): string | null {
@@ -191,8 +219,26 @@ class Config {
     this.save();
   }
 
+  get relayPort(): number {
+    return this.data.relayPort;
+  }
+
+  set relayPort(value: number) {
+    this.data.relayPort = value;
+    this.save();
+  }
+
   get isPaired(): boolean {
-    return !!this.userId && !!this.deviceId;
+    return !!this.deviceId && !!this.pairedAt;
+  }
+
+  // Ensure deviceId exists, generating one if needed
+  ensureDeviceId(): string {
+    if (!this.data.deviceId) {
+      this.data.deviceId = this.getMachineId();
+      this.save();
+    }
+    return this.data.deviceId;
   }
 
   // Get unique machine identifier
