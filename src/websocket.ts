@@ -274,9 +274,9 @@ export class WebSocketClient extends EventEmitter {
             ...initPayload,
             recipientDeviceId: data.deviceId,
           });
-          console.log(`[E2EE] Initiated key exchange with ${data.deviceId}`);
+          // E2EE key exchange initiated
         } catch (err) {
-          console.warn(`[E2EE] Failed to initiate key exchange:`, (err as Error).message);
+          console.warn('[E2EE] Failed to initiate key exchange');
         }
       }
     });
@@ -314,7 +314,7 @@ export class WebSocketClient extends EventEmitter {
       const mobileDeviceId = data.mobileDeviceId;
       if (mobileDeviceId && this.e2eeManager) {
         this.e2eeManager.clearTrustOnly(mobileDeviceId);
-        console.log(`[E2EE] Reset TOFU trust for ${mobileDeviceId} (re-pair)`);
+        // Reset TOFU trust for re-pair
       }
     });
 
@@ -330,11 +330,10 @@ export class WebSocketClient extends EventEmitter {
           recipientDeviceId: data.senderDeviceId,
         });
         this.emit('e2ee_established', { peerDeviceId: data.senderDeviceId });
-        console.log(`[E2EE] Session established with ${data.senderDeviceId}`);
         this.flushSensitiveQueue();
         this.sendAllUsageStats();
       } catch (err) {
-        console.error(`[E2EE] Key exchange init failed:`, (err as Error).message);
+        console.error('[E2EE] Key exchange init failed');
       }
     });
 
@@ -344,29 +343,54 @@ export class WebSocketClient extends EventEmitter {
         this.e2eeManager.handleKeyExchangeAck(data);
         this.e2eePeerDeviceId = data.senderDeviceId;
         this.emit('e2ee_established', { peerDeviceId: data.senderDeviceId });
-        console.log(`[E2EE] Session established (via ack) with ${data.senderDeviceId}`);
         this.flushSensitiveQueue();
         this.sendAllUsageStats();
       } catch (err) {
-        console.error(`[E2EE] Key exchange ack failed:`, (err as Error).message);
+        console.error('[E2EE] Key exchange ack failed');
       }
     });
 
     // Encrypted messages — decrypt and re-emit as original event
     this.server.on('encrypted_message', (data: EncryptedMessage) => {
       if (!this.e2eeManager) return;
+
+      let plaintext: string;
       try {
-        const plaintext = this.e2eeManager.decryptMessage(data, data.senderDeviceId);
-        const parsed = JSON.parse(plaintext);
-        if (parsed._event && ALLOWED_ENCRYPTED_EVENTS.has(parsed._event)) {
-          console.log(`[E2EE] Decrypted ${parsed._event} from ${data.senderDeviceId}`);
-          this.emit(parsed._event, parsed._data);
-        } else if (parsed._event) {
-          console.warn(`[E2EE] Blocked unknown encrypted event: ${parsed._event}`);
-        }
-      } catch (err) {
-        console.error(`[E2EE] Failed to decrypt message:`, (err as Error).message);
+        plaintext = this.e2eeManager.decryptMessage(data, data.senderDeviceId);
+      } catch {
+        console.error('[E2EE] Decryption failed — message dropped');
+        return;
       }
+
+      // Validate JSON structure separately from decryption
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(plaintext);
+      } catch {
+        console.error('[E2EE] Invalid JSON in decrypted message — dropped');
+        return;
+      }
+
+      // Validate payload structure
+      if (!parsed || typeof parsed !== 'object') {
+        console.error('[E2EE] Decrypted payload is not an object — dropped');
+        return;
+      }
+
+      const payload = parsed as Record<string, unknown>;
+      const eventName = payload._event;
+
+      if (typeof eventName !== 'string') {
+        console.error('[E2EE] Missing or invalid _event in decrypted payload — dropped');
+        return;
+      }
+
+      if (!ALLOWED_ENCRYPTED_EVENTS.has(eventName)) {
+        console.warn('[E2EE] Decrypted event not in whitelist — dropped');
+        return;
+      }
+
+      this.emit(eventName, payload._data);
     });
 
     // Initialize E2EE (non-blocking — don't delay server start)
@@ -400,11 +424,11 @@ export class WebSocketClient extends EventEmitter {
     for (const targetDeviceId of persisted) {
       const restored = await this.e2eeManager.restorePersistedSession(targetDeviceId);
       if (restored) {
-        console.log(`[E2EE] Restored session with ${targetDeviceId}`);
+        // Restored persisted E2EE session
       }
     }
 
-    console.log(`[E2EE] Initialized, publicKey available`);
+    // E2EE initialized
   }
 
   /**
@@ -425,7 +449,7 @@ export class WebSocketClient extends EventEmitter {
         this.server?.emitToMobile('encrypted_message', encrypted);
         return;
       } catch (err) {
-        console.error(`[E2EE] Encryption failed, message NOT sent (refusing plaintext fallback):`, (err as Error).message);
+        console.error('[E2EE] Encryption failed, message NOT sent (refusing plaintext fallback)');
         return;
       }
     }
@@ -437,7 +461,7 @@ export class WebSocketClient extends EventEmitter {
         if (this.pendingSensitiveMessages.length >= WebSocketClient.MAX_PENDING_SENSITIVE) {
           const dropped = this.pendingSensitiveMessages.shift();
           if (dropped) {
-            console.warn(`[E2EE] Sensitive queue full (${WebSocketClient.MAX_PENDING_SENSITIVE}), dropped oldest: ${dropped.event}`);
+            console.warn('[E2EE] Sensitive queue full, dropped oldest');
           }
         }
         this.pendingSensitiveMessages.push({
@@ -447,12 +471,12 @@ export class WebSocketClient extends EventEmitter {
           queuedAt: Date.now(),
         });
         if (this.pendingSensitiveMessages.length === 1) {
-          console.warn(`[E2EE] Queued sensitive event '${event}' — waiting for E2EE session`);
+          console.warn('[E2EE] Queued sensitive event — waiting for E2EE session');
         }
         return;
       }
       // E2EE not initialized — drop silently (no user data leaks)
-      console.error(`[E2EE] Dropped sensitive event '${event}' — E2EE not available, refusing plaintext`);
+      console.error('[E2EE] Dropped sensitive event — E2EE not available, refusing plaintext');
       return;
     }
 
@@ -486,7 +510,7 @@ export class WebSocketClient extends EventEmitter {
     }
 
     this.pendingSensitiveMessages = [];
-    console.log(`[E2EE] Flushed sensitive queue: ${sent} sent, ${dropped} dropped (expired)`);
+    // Flushed sensitive queue
   }
 
   /** Get the E2EE manager (for external key exchange initiation) */

@@ -179,9 +179,7 @@ export function loadTrustedPeerKeys(): void {
           count++;
         }
       }
-      if (count > 0) {
-        console.log(`[E2EE] Loaded ${count} trusted peer key(s)`);
-      }
+      // Loaded trusted peer keys
     }
   } catch {
     // File doesn't exist or is malformed — start fresh
@@ -229,7 +227,7 @@ export function trustPeerKey(deviceId: string, identityPublicKey: string): boole
   if (!existing) {
     trustedPeerKeys.set(deviceId, identityPublicKey);
     saveTrustedPeerKeys();
-    console.log(`[E2EE] TOFU: Trusted new identity key for ${deviceId}`);
+    // TOFU: trusted new identity key
   }
   return true;
 }
@@ -241,6 +239,6 @@ export function removeTrustedPeerKey(deviceId: string): void {
   if (trustedPeerKeys.has(deviceId)) {
     trustedPeerKeys.delete(deviceId);
     saveTrustedPeerKeys();
-    console.log(`[E2EE] TOFU: Removed trusted key for ${deviceId} (re-pair reset)`);
+    // TOFU: removed trusted key for re-pair reset
   }
 }

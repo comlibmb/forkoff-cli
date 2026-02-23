@@ -173,13 +173,11 @@ export class E2EEManager {
     const parts = [prefix, peerId, ephemeralPublicKey];
     if (recipientDeviceId) parts.push(recipientDeviceId);
     const msgString = parts.join(':');
-    console.log(`[E2EE-DIAG] verifyPeerSignature: msg="${msgString.substring(0, 100)}..." idPub=${identityPublicKey.substring(0, 12)}... sig=${signature.substring(0, 12)}...`);
     const message = decodeUTF8(msgString);
     const sigBytes = decodeBase64(signature);
     const pubKeyBytes = decodeBase64(identityPublicKey);
 
     const valid = nacl.sign.detached.verify(message, sigBytes, pubKeyBytes);
-    console.log(`[E2EE-DIAG] verifyPeerSignature result: ${valid}`);
     if (!valid) {
       throw new Error(
         `E2EE: INVALID SIGNATURE from device ${peerId}! ` +
@@ -205,14 +203,14 @@ export class E2EEManager {
     for (const [deviceId, entry] of this.pendingExchanges) {
       if (now - entry.createdAt > E2EEManager.PENDING_EXCHANGE_TTL_MS) {
         this.pendingExchanges.delete(deviceId);
-        console.log(`[E2EE] Evicted expired pending exchange for ${deviceId}`);
+        // Evicted expired pending exchange
       }
     }
     while (this.pendingExchanges.size >= E2EEManager.MAX_PENDING_EXCHANGES) {
       const oldestKey = this.pendingExchanges.keys().next().value;
       if (oldestKey) {
         this.pendingExchanges.delete(oldestKey);
-        console.warn(`[E2EE] MAX_PENDING_EXCHANGES (${E2EEManager.MAX_PENDING_EXCHANGES}) reached, evicted: ${oldestKey}`);
+        // MAX_PENDING_EXCHANGES reached, evicted oldest
       } else break;
     }
   }
@@ -269,7 +267,7 @@ export class E2EEManager {
     };
     persistSessionKey(this.deviceId, init.senderDeviceId, sessionKeys);
 
-    console.log(`[E2EE] Session established with ${init.senderDeviceId}`);
+    // E2EE session established
 
     // Sign our ack
     const signature = this.signPayload('KEY_EXCHANGE_ACK', ephemeral.publicKey, init.senderDeviceId);
@@ -289,7 +287,6 @@ export class E2EEManager {
    */
   handleKeyExchangeAck(ack: KeyExchangeAck): void {
     const peerId = ack.senderDeviceId;
-    console.log(`[E2EE-DIAG] handleKeyExchangeAck received: sender=${peerId?.substring(0, 20)}... recipient=${ack.recipientDeviceId?.substring(0, 20)}... ephPub=${ack.ephemeralPublicKey?.substring(0, 12)}... idPub=${ack.identityPublicKey?.substring(0, 12)}... sig=${ack.signature?.substring(0, 12)}...`);
     const pendingEntry = this.pendingExchanges.get(peerId);
     if (!pendingEntry) {
       throw new Error(`E2EE: No pending key exchange for device ${peerId}`);
@@ -329,7 +326,7 @@ export class E2EEManager {
 
     this.pendingExchanges.delete(peerId);
 
-    console.log(`[E2EE] Session established with ${peerId}`);
+    // E2EE session established
   }
 
   /**
@@ -348,7 +345,7 @@ export class E2EEManager {
     });
     storeSessionKey(targetDeviceId, persisted.sharedKey, persisted.sessionId);
 
-    console.log(`[E2EE] Restored persisted session for ${targetDeviceId}`);
+    // Restored persisted E2EE session
     return true;
   }
 

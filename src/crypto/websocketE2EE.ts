@@ -36,7 +36,7 @@ export class WebSocketE2EEIntegration {
         const ack = this.e2eeManager.handleKeyExchangeInit(data);
         this.emitKeyExchangeAck(data.senderDeviceId, ack.ephemeralPublicKey);
       } catch (error) {
-        console.error('[E2EE] Failed to handle key exchange init:', (error as Error).message);
+        console.error('[E2EE] Key exchange init failed');
       }
     });
 
@@ -45,9 +45,9 @@ export class WebSocketE2EEIntegration {
       if (!this.e2eeManager) return;
       try {
         this.e2eeManager.handleKeyExchangeAck(data);
-        console.log(`[E2EE] Key exchange completed with ${data.senderDeviceId}`);
+        // Key exchange completed
       } catch (error) {
-        console.error('[E2EE] Failed to handle key exchange ack:', (error as Error).message);
+        console.error('[E2EE] Key exchange ack failed');
       }
     });
 
@@ -61,7 +61,7 @@ export class WebSocketE2EEIntegration {
           decryptedContent: plaintext,
         });
       } catch (error) {
-        console.error('[E2EE] Failed to decrypt message:', (error as Error).message);
+        console.error('[E2EE] Failed to decrypt message — dropped');
       }
     });
   }
