@@ -34,11 +34,14 @@ interface TranscriptFetchResult {
   hasMore: boolean;
 }
 
+const MAX_WATCHERS = 50;
+
 class TranscriptStreamer extends EventEmitter {
   private watchers: Map<string, chokidar.FSWatcher> = new Map();
   private fileSizes: Map<string, number> = new Map();
   private lastLineNumbers: Map<string, number> = new Map();
   private processingLock: Map<string, boolean> = new Map(); // Prevent concurrent reads
+  private sessionPaths: Map<string, string> = new Map(); // sessionKey -> transcriptPath
 
   /**
    * Fetch transcript history from a JSONL file
@@ -115,10 +118,16 @@ class TranscriptStreamer extends EventEmitter {
     // Unsubscribe if already subscribed
     this.unsubscribeFromUpdates(sessionKey);
 
-    console.log(`[Transcript] subscribeToUpdates: sessionKey=${sessionKey}, path=${transcriptPath}`);
+    // Guard against unbounded watcher growth
+    if (this.watchers.size >= MAX_WATCHERS) {
+      console.warn(`[Transcript] MAX_WATCHERS (${MAX_WATCHERS}) reached, refusing to subscribe: ${sessionKey}`);
+      return;
+    }
+
+    console.log(`[Transcript] subscribeToUpdates: sessionKey=${sessionKey}`);
 
     if (!fs.existsSync(transcriptPath)) {
-      console.log(`[Transcript] File does not exist: ${transcriptPath}`);
+      console.log(`[Transcript] Transcript file does not exist`);
       return;
     }
 
@@ -183,6 +192,7 @@ class TranscriptStreamer extends EventEmitter {
     });
 
     this.watchers.set(sessionKey, watcher);
+    this.sessionPaths.set(sessionKey, transcriptPath);
   }
 
   /**
@@ -195,6 +205,11 @@ class TranscriptStreamer extends EventEmitter {
       this.watchers.delete(sessionKey);
       this.fileSizes.delete(sessionKey);
       this.processingLock.delete(sessionKey);
+      const transcriptPath = this.sessionPaths.get(sessionKey);
+      if (transcriptPath) {
+        this.lastLineNumbers.delete(transcriptPath);
+        this.sessionPaths.delete(sessionKey);
+      }
     }
   }
 
@@ -211,7 +226,7 @@ class TranscriptStreamer extends EventEmitter {
       let lineNumber = 0;
       let newLinesFound = 0;
 
-      console.log(`[Transcript] readNewLines: lastLineNumber=${lastLineNumber}, path=${transcriptPath}`);
+      console.log(`[Transcript] readNewLines: lastLineNumber=${lastLineNumber}`);
 
       const fileStream = fs.createReadStream(transcriptPath, { encoding: 'utf8' });
       const rl = readline.createInterface({
@@ -231,7 +246,7 @@ class TranscriptStreamer extends EventEmitter {
             entries.push(entry);
           } else {
             // Log first 100 chars of skipped line to understand what's being skipped
-            console.log(`[Transcript] Line ${lineNumber} skipped (no entry), preview: ${line.substring(0, 100)}`);
+            console.log(`[Transcript] Line ${lineNumber} skipped (no entry)`);
           }
         }
       });
@@ -494,6 +509,7 @@ class TranscriptStreamer extends EventEmitter {
     this.fileSizes.clear();
     this.lastLineNumbers.clear();
     this.processingLock.clear();
+    this.sessionPaths.clear();
   }
 }
 

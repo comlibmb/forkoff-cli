@@ -1,94 +1,44 @@
-import * as crypto from 'crypto';
+/**
+ * Encryption/Decryption Service
+ * Uses NaCl secretbox (XSalsa20-Poly1305) for symmetric encryption.
+ * Compatible with mobile app's tweetnacl implementation.
+ */
+import nacl from 'tweetnacl';
+import { encodeBase64, decodeBase64, encodeUTF8, decodeUTF8 } from 'tweetnacl-util';
 import { EncryptedPayload } from './types';
 
-const ALGORITHM = 'aes-256-gcm';
-const NONCE_LENGTH = 12; // 96 bits for AES-GCM
-const AUTH_TAG_LENGTH = 16; // 128 bits for AES-GCM
-
 /**
- * Encrypts plaintext using AES-256-GCM
- *
- * @param plaintext - Text to encrypt
- * @param key - 32-byte encryption key (AES-256)
- * @returns EncryptedPayload with Base64-encoded ciphertext, nonce, and authTag
+ * Encrypt a plaintext string using NaCl secretbox.
+ * @param plaintext - The message to encrypt
+ * @param key - 32-byte shared secret key
+ * @returns EncryptedPayload with Base64-encoded ciphertext and nonce
  */
 export function encrypt(plaintext: string, key: Uint8Array): EncryptedPayload {
-  if (key.length !== 32) {
-    throw new Error('Encryption key must be 32 bytes (256 bits)');
-  }
-
-  // Generate random nonce (12 bytes)
-  const nonce = crypto.randomBytes(NONCE_LENGTH);
-
-  // Create cipher
-  const cipher = crypto.createCipheriv(ALGORITHM, key, nonce);
-
-  // Encrypt
-  const ciphertext = Buffer.concat([
-    cipher.update(plaintext, 'utf8'),
-    cipher.final(),
-  ]);
-
-  // Get authentication tag
-  const authTag = cipher.getAuthTag();
-
-  if (authTag.length !== AUTH_TAG_LENGTH) {
-    throw new Error('Auth tag must be 16 bytes');
-  }
+  const nonce = nacl.randomBytes(nacl.secretbox.nonceLength); // 24 bytes
+  const messageBytes = decodeUTF8(plaintext);
+  const ciphertext = nacl.secretbox(messageBytes, nonce, key);
 
   return {
-    ciphertext: ciphertext.toString('base64'),
-    nonce: nonce.toString('base64'),
-    authTag: authTag.toString('base64'),
+    ciphertext: encodeBase64(ciphertext),
+    nonce: encodeBase64(nonce),
   };
 }
 
 /**
- * Decrypts ciphertext using AES-256-GCM
- *
- * @param payload - EncryptedPayload with Base64-encoded ciphertext, nonce, and authTag
- * @param key - 32-byte encryption key (AES-256)
- * @returns Decrypted plaintext
+ * Decrypt an EncryptedPayload back to plaintext.
+ * @param payload - The encrypted payload (ciphertext + nonce)
+ * @param key - 32-byte shared secret key (must match encryption key)
+ * @returns Decrypted plaintext string
  * @throws Error if decryption fails (wrong key, tampered data, etc.)
  */
-export function decrypt(
-  payload: EncryptedPayload,
-  key: Uint8Array
-): string {
-  if (key.length !== 32) {
-    throw new Error('Decryption key must be 32 bytes (256 bits)');
+export function decrypt(payload: EncryptedPayload, key: Uint8Array): string {
+  const ciphertext = decodeBase64(payload.ciphertext);
+  const nonce = decodeBase64(payload.nonce);
+
+  const decrypted = nacl.secretbox.open(ciphertext, nonce, key);
+  if (!decrypted) {
+    throw new Error('E2EE: Decryption failed - message may be tampered or wrong key');
   }
 
-  // Decode from Base64
-  const ciphertext = Buffer.from(payload.ciphertext, 'base64');
-  const nonce = Buffer.from(payload.nonce, 'base64');
-  const authTag = Buffer.from(payload.authTag, 'base64');
-
-  if (nonce.length !== NONCE_LENGTH) {
-    throw new Error('Nonce must be 12 bytes');
-  }
-
-  if (authTag.length !== AUTH_TAG_LENGTH) {
-    throw new Error('Auth tag must be 16 bytes');
-  }
-
-  try {
-    // Create decipher
-    const decipher = crypto.createDecipheriv(ALGORITHM, key, nonce);
-
-    // Set auth tag for verification
-    decipher.setAuthTag(authTag);
-
-    // Decrypt
-    const plaintext = Buffer.concat([
-      decipher.update(ciphertext),
-      decipher.final(),
-    ]);
-
-    return plaintext.toString('utf8');
-  } catch (error) {
-    throw new Error(
-      `Decryption failed: ${error instanceof Error ? error.message : 'unknown error'}`
-    );
-  }
+  return encodeUTF8(decrypted);
 }

@@ -3,6 +3,92 @@ import { EventEmitter } from 'events';
 import * as os from 'os';
 import * as path from 'path';
 
+function getSafeEnv(): Record<string, string | undefined> {
+  const sensitivePatterns = [
+    /^AWS_/i,
+    /^AZURE_/i,
+    /^GCP_/i,
+    /^GOOGLE_/i,
+    /SECRET/i,
+    /PASSWORD/i,
+    /PRIVATE_KEY/i,
+    /^SUPABASE_SERVICE/i,
+    /^DATABASE_URL$/i,
+    /^ADMIN_API_KEY$/i,
+    // Prevent code injection via environment variables
+    /^NODE_OPTIONS$/i,
+    /^NODE_EXTRA_CA_CERTS$/i,
+    /^LD_PRELOAD$/i,
+    /^LD_LIBRARY_PATH$/i,
+    /^DYLD_INSERT_LIBRARIES$/i,
+    /^DYLD_LIBRARY_PATH$/i,
+    /^ELECTRON_RUN_AS_NODE$/i,
+    // Language-specific code injection vectors
+    /^PYTHONPATH$/i,
+    /^PYTHONSTARTUP$/i,
+    /^RUBYLIB$/i,
+    /^PERL5LIB$/i,
+    /^PERL5OPT$/i,
+    /^JAVA_TOOL_OPTIONS$/i,
+    /^_JAVA_OPTIONS$/i,
+    // Git/SSH injection
+    /^GIT_SSH_COMMAND$/i,
+    /^GIT_EXEC_PATH$/i,
+    // Pager/editor injection
+    /^LESSOPEN$/i,
+    /^LESSCLOSE$/i,
+    // Shell startup injection
+    /^BASH_ENV$/i,
+    /^ENV$/i,
+    /^PROMPT_COMMAND$/i,
+    /^SHELLOPTS$/i,
+    // Field separator injection
+    /^IFS$/i,
+    // Editor/browser auto-launch injection
+    /^EDITOR$/i,
+    /^VISUAL$/i,
+    /^BROWSER$/i,
+    // Proxy injection (MITM child process HTTP traffic)
+    /^HTTPS?_PROXY$/i,
+    /^ALL_PROXY$/i,
+    /^NO_PROXY$/i,
+    // TLS verification bypass
+    /^SSL_CERT_FILE$/i,
+    /^SSL_CERT_DIR$/i,
+    /^NODE_TLS_REJECT_UNAUTHORIZED$/i,
+    // npm config injection
+    /^npm_config_/i,
+    // Pager injection (git, man, etc.)
+    /^PAGER$/i,
+    // Zsh startup injection
+    /^ZDOTDIR$/i,
+    // Curl config injection
+    /^CURL_HOME$/i,
+    // Third-party API keys (defense-in-depth for child processes)
+    /^OPENAI_/i,
+    /^ANTHROPIC_/i,
+    /^GITHUB_TOKEN$/i,
+    /^GITLAB_TOKEN$/i,
+    /^NPM_TOKEN$/i,
+    /^DOCKER_PASSWORD$/i,
+    /^SLACK_TOKEN$/i,
+    /^SLACK_BOT_TOKEN$/i,
+    /^SENDGRID_/i,
+    /^TWILIO_/i,
+    /^DATADOG_/i,
+    /TOKEN$/i,
+    /API_KEY$/i,
+  ];
+
+  const filtered: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!sensitivePatterns.some(pattern => pattern.test(key))) {
+      filtered[key] = value;
+    }
+  }
+  return filtered;
+}
+
 interface TerminalSession {
   id: string;
   process: ChildProcess | null;
@@ -10,6 +96,7 @@ interface TerminalSession {
 }
 
 class TerminalManager extends EventEmitter {
+  private static readonly MAX_SESSIONS = 50;
   private sessions: Map<string, TerminalSession> = new Map();
   private defaultShell: string;
 
@@ -26,6 +113,15 @@ class TerminalManager extends EventEmitter {
   }
 
   createSession(terminalSessionId: string, cwd?: string): TerminalSession {
+    // Evict oldest session if at cap (FIFO)
+    if (this.sessions.size >= TerminalManager.MAX_SESSIONS) {
+      const oldestKey = this.sessions.keys().next().value;
+      if (oldestKey) {
+        console.warn(`[Terminal] MAX_SESSIONS (${TerminalManager.MAX_SESSIONS}) reached, evicting oldest: ${oldestKey}`);
+        this.closeSession(oldestKey);
+      }
+    }
+
     // Default to home directory, not process.cwd()
     let resolvedCwd = cwd || os.homedir();
 
@@ -67,7 +163,7 @@ class TerminalManager extends EventEmitter {
 
       const proc = spawn(shell, shellArgs, {
         cwd: session.cwd,
-        env: process.env,
+        env: getSafeEnv(),
         shell: false,
       });
 

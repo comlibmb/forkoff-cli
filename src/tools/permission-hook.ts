@@ -102,6 +102,32 @@ interface HookOutput {
 // Helpers
 // ---------------------------------------------------------------------------
 
+function safeReadFile(filePath: string): string | null {
+  try {
+    const stat = fs.lstatSync(filePath);
+    if (stat.isSymbolicLink()) {
+      console.error(`[Security] Symlink detected, refusing to read: ${filePath}`);
+      return null;
+    }
+    return fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+function safeWriteFile(filePath: string, content: string): boolean {
+  try {
+    // SECURITY: Atomic write via temp file + rename to prevent TOCTOU symlink attacks
+    const tmpPath = filePath + '.tmp.' + process.pid;
+    fs.writeFileSync(tmpPath, content, { encoding: 'utf-8', mode: 0o600 });
+    fs.renameSync(tmpPath, filePath);
+    return true;
+  } catch (err) {
+    console.error(`[Security] Failed to write file safely`, (err as Error).message);
+    return false;
+  }
+}
+
 /** Write the decision JSON to stdout synchronously and exit immediately. */
 function respond(decision: 'allow' | 'deny', reason: string): never {
   const output: HookOutput = {
@@ -118,28 +144,35 @@ function respond(decision: 'allow' | 'deny', reason: string): never {
   process.exit(decision === 'allow' ? 0 : 2);
 }
 
-/** Ensure the temp directory exists. */
+/** Ensure the temp directory exists and has safe permissions. */
 function ensureTempDir(): void {
   if (!fs.existsSync(TEMP_DIR)) {
-    fs.mkdirSync(TEMP_DIR, { recursive: true });
+    fs.mkdirSync(TEMP_DIR, { recursive: true, mode: 0o700 });
+  } else {
+    // SECURITY: Validate existing dir isn't world/group-writable (attacker pre-creation)
+    const stat = fs.statSync(TEMP_DIR);
+    const mode = stat.mode & 0o777;
+    if (mode & 0o022) { // group or other writable
+      console.error(`[Security] Temp dir has unsafe permissions (${mode.toString(8)}), aborting`);
+      respond('deny', 'Permission temp directory has unsafe permissions');
+    }
   }
 }
 
-/** Cleanup request and response temp files. */
+/** Cleanup request and response temp files (with symlink protection). */
 function cleanup(promptId: string): void {
   const requestFile = path.join(TEMP_DIR, `${promptId}.request.json`);
   const responseFile = path.join(TEMP_DIR, `${promptId}.response.json`);
 
-  try {
-    if (fs.existsSync(requestFile)) fs.unlinkSync(requestFile);
-  } catch {
-    // Best effort — ignore errors during cleanup.
-  }
-
-  try {
-    if (fs.existsSync(responseFile)) fs.unlinkSync(responseFile);
-  } catch {
-    // Best effort.
+  for (const filePath of [requestFile, responseFile]) {
+    try {
+      const stat = fs.lstatSync(filePath);
+      if (stat.isFile() && !stat.isSymbolicLink()) {
+        fs.unlinkSync(filePath);
+      }
+    } catch {
+      // Best effort — file may not exist or already deleted.
+    }
   }
 }
 
@@ -149,7 +182,10 @@ function cleanup(promptId: string): void {
  */
 export function loadRules(): { safeTools: Set<string>; bashPatterns: string[] } {
   try {
-    const raw = fs.readFileSync(RULES_FILE, 'utf-8');
+    const raw = safeReadFile(RULES_FILE);
+    if (raw === null) {
+      return { safeTools: new Set(DEFAULT_SAFE_TOOLS), bashPatterns: [] };
+    }
     const rules: PermissionRule[] = JSON.parse(raw);
 
     if (!Array.isArray(rules)) {
@@ -192,13 +228,38 @@ export function matchesAnyPattern(command: string, patterns: string[]): boolean 
 /**
  * Simple glob matching: `*` matches any sequence of characters.
  * The entire command must match (not just a prefix).
+ * Uses iterative matching to avoid ReDoS from regex catastrophic backtracking.
  */
 function globMatch(str: string, pattern: string): boolean {
-  // Escape regex special chars except *, then replace * with .*
-  const regexStr = '^' + pattern
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*/g, '.*') + '$';
-  return new RegExp(regexStr).test(str);
+  // SECURITY: Reject overly long or complex patterns to prevent DoS
+  if (pattern.length > 200) return false;
+
+  // Iterative glob matcher (no regex — immune to ReDoS)
+  let si = 0, pi = 0;
+  let starSi = -1, starPi = -1;
+
+  while (si < str.length) {
+    if (pi < pattern.length && (pattern[pi] === str[si] || pattern[pi] === '?')) {
+      si++;
+      pi++;
+    } else if (pi < pattern.length && pattern[pi] === '*') {
+      starPi = pi;
+      starSi = si;
+      pi++;
+    } else if (starPi !== -1) {
+      pi = starPi + 1;
+      starSi++;
+      si = starSi;
+    } else {
+      return false;
+    }
+  }
+
+  while (pi < pattern.length && pattern[pi] === '*') {
+    pi++;
+  }
+
+  return pi === pattern.length;
 }
 
 /**
@@ -218,10 +279,12 @@ function pollForResponse(promptId: string): Promise<PermissionResponse | null> {
 
       try {
         if (fs.existsSync(responseFile)) {
-          const raw = fs.readFileSync(responseFile, 'utf-8');
-          const response: PermissionResponse = JSON.parse(raw);
-          resolve(response);
-          return;
+          const raw = safeReadFile(responseFile);
+          if (raw !== null) {
+            const response: PermissionResponse = JSON.parse(raw);
+            resolve(response);
+            return;
+          }
         }
       } catch {
         // File may be partially written — retry on next poll.
@@ -301,7 +364,9 @@ async function main(): Promise<void> {
     };
 
     const requestFile = path.join(TEMP_DIR, `${promptId}.request.json`);
-    fs.writeFileSync(requestFile, JSON.stringify(request, null, 2), 'utf-8');
+    if (!safeWriteFile(requestFile, JSON.stringify(request, null, 2))) {
+      respond('deny', 'Failed to write permission request file');
+    }
 
     console.error(
       `[forkoff-hook] Permission requested for ${toolName} (promptId=${promptId}), polling...`,

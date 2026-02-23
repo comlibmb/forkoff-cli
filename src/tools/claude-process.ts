@@ -11,6 +11,96 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { PermissionIpcManager, PermissionPromptEvent } from './permission-ipc';
 
+/**
+ * Returns a filtered copy of process.env with sensitive variables removed.
+ * Prevents accidental leakage of credentials to Claude child processes.
+ */
+function getSafeEnv(): Record<string, string | undefined> {
+  const sensitivePatterns = [
+    /^AWS_/i,
+    /^AZURE_/i,
+    /^GCP_/i,
+    /^GOOGLE_/i,
+    /SECRET/i,
+    /PASSWORD/i,
+    /PRIVATE_KEY/i,
+    /^SUPABASE_SERVICE/i,
+    /^DATABASE_URL$/i,
+    /^ADMIN_API_KEY$/i,
+    // Prevent code injection via environment variables
+    /^NODE_OPTIONS$/i,
+    /^NODE_EXTRA_CA_CERTS$/i,
+    /^LD_PRELOAD$/i,
+    /^LD_LIBRARY_PATH$/i,
+    /^DYLD_INSERT_LIBRARIES$/i,
+    /^DYLD_LIBRARY_PATH$/i,
+    /^ELECTRON_RUN_AS_NODE$/i,
+    // Language-specific code injection vectors
+    /^PYTHONPATH$/i,
+    /^PYTHONSTARTUP$/i,
+    /^RUBYLIB$/i,
+    /^PERL5LIB$/i,
+    /^PERL5OPT$/i,
+    /^JAVA_TOOL_OPTIONS$/i,
+    /^_JAVA_OPTIONS$/i,
+    // Git/SSH injection
+    /^GIT_SSH_COMMAND$/i,
+    /^GIT_EXEC_PATH$/i,
+    // Pager/editor injection
+    /^LESSOPEN$/i,
+    /^LESSCLOSE$/i,
+    // Shell startup injection
+    /^BASH_ENV$/i,
+    /^ENV$/i,
+    /^PROMPT_COMMAND$/i,
+    /^SHELLOPTS$/i,
+    // Field separator injection
+    /^IFS$/i,
+    // Editor/browser auto-launch injection
+    /^EDITOR$/i,
+    /^VISUAL$/i,
+    /^BROWSER$/i,
+    // Proxy injection (MITM child process HTTP traffic)
+    /^HTTPS?_PROXY$/i,
+    /^ALL_PROXY$/i,
+    /^NO_PROXY$/i,
+    // TLS verification bypass
+    /^SSL_CERT_FILE$/i,
+    /^SSL_CERT_DIR$/i,
+    /^NODE_TLS_REJECT_UNAUTHORIZED$/i,
+    // npm config injection
+    /^npm_config_/i,
+    // Pager injection (git, man, etc.)
+    /^PAGER$/i,
+    // Zsh startup injection
+    /^ZDOTDIR$/i,
+    // Curl config injection
+    /^CURL_HOME$/i,
+    // Third-party API keys (defense-in-depth for child processes)
+    /^OPENAI_/i,
+    /^ANTHROPIC_/i,
+    /^GITHUB_TOKEN$/i,
+    /^GITLAB_TOKEN$/i,
+    /^NPM_TOKEN$/i,
+    /^DOCKER_PASSWORD$/i,
+    /^SLACK_TOKEN$/i,
+    /^SLACK_BOT_TOKEN$/i,
+    /^SENDGRID_/i,
+    /^TWILIO_/i,
+    /^DATADOG_/i,
+    /TOKEN$/i,
+    /API_KEY$/i,
+  ];
+
+  const filtered: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!sensitivePatterns.some(pattern => pattern.test(key))) {
+      filtered[key] = value;
+    }
+  }
+  return filtered;
+}
+
 interface ClaudeProcessInfo {
   terminalSessionId: string;
   process: ChildProcess;
@@ -136,6 +226,8 @@ interface ClaudeApprovalRequest {
   context: string[];       // Recent output lines for context
   options: string[];       // Available options (e.g., ['y:yes', 'n:no', 'p:plan'])
   promptText: string;      // The actual prompt text
+  toolName?: string;       // Structured tool name from SDK tool_use block
+  toolInput?: any;         // Structured tool input from SDK tool_use block
 }
 
 /** SDK message structure received from Claude CLI JSONL output */
@@ -224,12 +316,15 @@ interface ToolActivityEvent {
 }
 
 class ClaudeProcessManager extends EventEmitter {
+  private static readonly MAX_ACTIVE_PROCESSES = 20;
+  private static readonly MAX_PENDING_APPROVALS = 50;
   private processes: Map<string, ClaudeProcessInfo> = new Map();
   private pendingApprovals: Map<string, PendingApproval> = new Map();
   private readonly APPROVAL_TIMEOUT_MS: number = 5 * 60 * 1000; // 5 minutes
   private readonly MAX_OUTPUT_BUFFER_LINES: number = 20;
   /** Track closed sessions for auto-restart */
   private closedSessions: Map<string, SessionRestartInfo> = new Map();
+  private static readonly MAX_CLOSED_SESSIONS = 200;
   /** Maximum number of auto-restarts per session to prevent chaos */
   private readonly MAX_AUTO_RESTARTS: number = 3;
   /** Permission IPC managers per session */
@@ -240,6 +335,7 @@ class ClaudeProcessManager extends EventEmitter {
   private hookConfiguredDirs: Set<string> = new Set();
   /** Track sessions that mobile has explicitly taken over (via claude_resume_session) */
   private takenOverSessions: Set<string> = new Set();
+  private static readonly MAX_TAKEN_OVER_SESSIONS = 100;
 
   /** Type-safe emit for known events */
   public override emit<K extends keyof ClaudeProcessManagerEvents>(
@@ -286,11 +382,12 @@ class ClaudeProcessManager extends EventEmitter {
     // SECURITY: Using cross-spawn instead of shell: true to prevent command injection
     const proc = spawn('claude', args, {
       cwd: resolvedDir,
-      env: { ...process.env, TERM: 'xterm-256color' },
+      env: { ...getSafeEnv(), TERM: 'xterm-256color' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
     this.setupProcessHandlers(terminalSessionId, proc, resolvedDir);
+    this.enforceProcessCap();
     this.processes.set(terminalSessionId, { terminalSessionId, process: proc, directory: resolvedDir, outputBuffer: [], wasAutoRestarted: false, dangerouslySkipPermissions: !!dangerouslySkipPermissions, interactivePermissions: !!interactivePermissions });
 
     return { cwd: resolvedDir };
@@ -323,16 +420,17 @@ class ClaudeProcessManager extends EventEmitter {
       this.startPermissionIpc(terminalSessionId, sessionKey);
     }
 
-    console.log(`[Claude Process] Spawning: claude ${args.join(' ')}`);
+    console.log(`[Claude Process] Spawning: claude (${args.length} args)`);
 
     // SECURITY: Using cross-spawn instead of shell: true to prevent command injection
     const proc = spawn('claude', args, {
       cwd: resolvedDir,
-      env: { ...process.env, TERM: 'xterm-256color' },
+      env: { ...getSafeEnv(), TERM: 'xterm-256color' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
     this.setupProcessHandlers(terminalSessionId, proc, resolvedDir, sessionKey);
+    this.enforceProcessCap();
     this.processes.set(terminalSessionId, { terminalSessionId, process: proc, directory: resolvedDir, sessionKey, outputBuffer: [], wasAutoRestarted: false, dangerouslySkipPermissions: !!dangerouslySkipPermissions, interactivePermissions: !!interactivePermissions });
 
     // Store session info for future message sends (needed since we spawn fresh process per message)
@@ -422,7 +520,7 @@ class ClaudeProcessManager extends EventEmitter {
     }
 
     // Write message to stdin IMMEDIATELY - no waiting
-    console.log(`[Claude Process] Sending JSONL immediately: ${jsonLine.substring(0, 100)}...`);
+    console.log(`[Claude Process] Sending JSONL immediately (${jsonLine.length} chars)`);
 
     return new Promise((resolve) => {
       try {
@@ -466,11 +564,12 @@ class ClaudeProcessManager extends EventEmitter {
 
     const proc = spawn('claude', args, {
       cwd: resolvedDir,
-      env: { ...process.env, TERM: 'xterm-256color' },
+      env: { ...getSafeEnv(), TERM: 'xterm-256color' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
     this.setupProcessHandlers(terminalSessionId, proc, resolvedDir);
+    this.enforceProcessCap();
     this.processes.set(terminalSessionId, {
       terminalSessionId,
       process: proc,
@@ -515,7 +614,7 @@ class ClaudeProcessManager extends EventEmitter {
             console.error(`[Claude Process] Error writing initial message:`, err.message);
             resolve(false);
           } else {
-            console.log(`[Claude Process] Initial message written to new session in ${resolvedDir}`);
+            console.log(`[Claude Process] Initial message written to new session`);
             resolve(true);
           }
         });
@@ -546,6 +645,8 @@ class ClaudeProcessManager extends EventEmitter {
    * Used when mobile opens a session view - we store the info so we can spawn later on first message.
    */
   registerSession(sessionKey: string, directory: string, terminalSessionId: string, dangerouslySkipPermissions?: boolean, interactivePermissions?: boolean, isRealSession?: boolean): void {
+    this.cleanupOldClosedSessions();
+
     // If we already captured a real Claude session key (from SDK output) for this
     // terminalSessionId, preserve it. This prevents reconnects from overwriting
     // the real key with the mobile-generated one (e.g. brainstorm-*).
@@ -553,7 +654,7 @@ class ClaudeProcessManager extends EventEmitter {
     const effectiveSessionKey = (existing?.isRealSession && existing.sessionKey) ? existing.sessionKey : sessionKey;
     const effectiveIsReal = (existing?.isRealSession) ? true : isRealSession;
 
-    console.log(`[Claude Process] Registering session: ${effectiveSessionKey} in ${directory}${dangerouslySkipPermissions ? ' (unrestricted)' : ''}${interactivePermissions ? ' (interactive)' : ''}${effectiveIsReal === false ? ' (fresh — no real Claude session)' : ''}`);
+    console.log(`[Claude Process] Registering session: ${effectiveSessionKey}${dangerouslySkipPermissions ? ' (unrestricted)' : ''}${interactivePermissions ? ' (interactive)' : ''}${effectiveIsReal === false ? ' (fresh — no real Claude session)' : ''}`);
     this.closedSessions.set(terminalSessionId, {
       sessionKey: effectiveSessionKey,
       directory,
@@ -576,11 +677,18 @@ class ClaudeProcessManager extends EventEmitter {
     sessionKey?: string
   ): void {
     // Buffer for incomplete JSONL lines
+    const MAX_LINE_BUFFER_SIZE = 10 * 1024 * 1024; // 10MB
     let jsonLineBuffer = '';
 
     proc.stdout?.on('data', (data: Buffer) => {
       const rawOutput = data.toString();
       jsonLineBuffer += rawOutput;
+
+      // Prevent unbounded buffer growth from missing newlines
+      if (jsonLineBuffer.length > MAX_LINE_BUFFER_SIZE) {
+        console.warn(`[Claude] JSONL line buffer exceeded ${MAX_LINE_BUFFER_SIZE} bytes, resetting`);
+        jsonLineBuffer = '';
+      }
 
       // Update output buffer for approval context
       const processInfo = this.processes.get(terminalSessionId);
@@ -615,7 +723,7 @@ class ClaudeProcessManager extends EventEmitter {
               if (message.type === 'result') {
                 console.log(`[Claude Process] Received result message - turn complete. Subtype: ${message.subtype}, Cost: $${message.cost_usd || 'unknown'}`);
                 if (message.is_error) {
-                  console.log(`[Claude Process] Result indicates error: ${JSON.stringify(message.error || 'unknown')}`);
+                  console.log(`[Claude Process] Result indicates error`);
                 }
 
                 // Capture session_id from result so future sendInput() can --resume
@@ -653,7 +761,7 @@ class ClaudeProcessManager extends EventEmitter {
             this.parseTaskProgress(terminalSessionId, message, sessionKey);
           } catch (e) {
             // Non-JSON output (shouldn't happen with SDK flags, but log it)
-            console.log(`[Claude Process] Non-JSON stdout: ${line.substring(0, 50)}...`);
+            console.log(`[Claude Process] Non-JSON stdout (${line.length} chars)`);
           }
         }
       }
@@ -769,15 +877,30 @@ class ClaudeProcessManager extends EventEmitter {
    * SECURITY: Validates path doesn't contain dangerous characters
    */
   private resolvePath(dir: string): string {
-    // SECURITY: Reject paths with shell metacharacters that could be dangerous
-    if (/[;&|`$()<>]/.test(dir)) {
+    // SECURITY: Reject paths with shell metacharacters or control characters
+    if (/[;&|`$()<>\n\r\0]/.test(dir)) {
       throw new Error('Invalid directory path: contains disallowed characters');
     }
 
+    let resolved: string;
     if (dir === '~' || dir.startsWith('~/')) {
-      return dir === '~' ? os.homedir() : dir.replace('~', os.homedir());
+      resolved = dir === '~' ? os.homedir() : dir.replace('~', os.homedir());
+    } else {
+      resolved = path.resolve(dir);
     }
-    return path.resolve(dir);
+
+    // SECURITY: Prevent path traversal — resolved path must be under home directory
+    const homeDir = os.homedir();
+    const normalized = path.normalize(resolved);
+    // On Windows, paths are case-insensitive — use lowercase comparison
+    const isUnderHome = os.platform() === 'win32'
+      ? normalized.toLowerCase().startsWith(homeDir.toLowerCase())
+      : normalized.startsWith(homeDir);
+    if (!isUnderHome) {
+      throw new Error('Invalid directory path: path traversal detected (must be under home directory)');
+    }
+
+    return normalized;
   }
 
   /**
@@ -808,6 +931,21 @@ class ClaudeProcessManager extends EventEmitter {
     }));
   }
 
+  /** Enforce cap on active processes to prevent resource exhaustion */
+  private enforceProcessCap(): void {
+    while (this.processes.size >= ClaudeProcessManager.MAX_ACTIVE_PROCESSES) {
+      const oldestKey = this.processes.keys().next().value;
+      if (oldestKey) {
+        const oldProcess = this.processes.get(oldestKey);
+        if (oldProcess?.process) {
+          try { oldProcess.process.kill(); } catch { /* best effort */ }
+        }
+        this.processes.delete(oldestKey);
+        console.warn(`[Claude Process] MAX_ACTIVE_PROCESSES (${ClaudeProcessManager.MAX_ACTIVE_PROCESSES}) reached, killed: ${oldestKey}`);
+      } else break;
+    }
+  }
+
   /**
    * Clean up old closed session entries to prevent memory leaks.
    * Sessions older than 1 hour are removed.
@@ -822,6 +960,15 @@ class ClaudeProcessManager extends EventEmitter {
         this.closedSessions.delete(sessionId);
         cleanedCount++;
       }
+    }
+
+    // Also enforce hard cap with FIFO eviction
+    while (this.closedSessions.size > ClaudeProcessManager.MAX_CLOSED_SESSIONS) {
+      const oldestKey = this.closedSessions.keys().next().value;
+      if (oldestKey) {
+        this.closedSessions.delete(oldestKey);
+        cleanedCount++;
+      } else break;
     }
 
     if (cleanedCount > 0) {
@@ -845,6 +992,14 @@ class ClaudeProcessManager extends EventEmitter {
    * Mark a session as taken over by the mobile user.
    */
   markTakenOver(terminalSessionId: string): void {
+    // Evict oldest if at cap (FIFO — Set iteration order is insertion order)
+    if (this.takenOverSessions.size >= ClaudeProcessManager.MAX_TAKEN_OVER_SESSIONS) {
+      const oldest = this.takenOverSessions.values().next().value;
+      if (oldest) {
+        this.takenOverSessions.delete(oldest);
+        console.warn(`[Claude Process] MAX_TAKEN_OVER_SESSIONS (${ClaudeProcessManager.MAX_TAKEN_OVER_SESSIONS}) reached, evicted: ${oldest}`);
+      }
+    }
     this.takenOverSessions.add(terminalSessionId);
     console.log(`[Claude Process] Session marked as taken over: ${terminalSessionId}`);
   }
@@ -930,10 +1085,22 @@ class ClaudeProcessManager extends EventEmitter {
 
     try {
       if (!fs.existsSync(rulesDir)) {
-        fs.mkdirSync(rulesDir, { recursive: true });
+        fs.mkdirSync(rulesDir, { recursive: true, mode: 0o700 });
+      } else {
+        // SECURITY: Validate temp dir permissions aren't world-writable
+        const dirStat = fs.statSync(rulesDir);
+        const dirMode = dirStat.mode & 0o777;
+        if (dirMode & 0o022) { // group or other writable
+          console.error(`[Security] Temp dir has unsafe permissions (${dirMode.toString(8)}), refusing to write`);
+          return;
+        }
       }
-      fs.writeFileSync(rulesFile, JSON.stringify(rules, null, 2), 'utf-8');
-      console.log(`[Claude Process] Permission rules written to ${rulesFile}`);
+
+      // SECURITY: Atomic write via temp file + rename to prevent TOCTOU
+      const tmpFile = rulesFile + '.tmp.' + process.pid;
+      fs.writeFileSync(tmpFile, JSON.stringify(rules, null, 2), { encoding: 'utf-8', mode: 0o600 });
+      fs.renameSync(tmpFile, rulesFile);
+      console.log(`[Claude Process] Permission rules written`);
     } catch (err) {
       console.error(`[Claude Process] Failed to write permission rules:`, (err as Error).message);
     }
@@ -948,7 +1115,7 @@ class ClaudeProcessManager extends EventEmitter {
 
     // Verify hook script exists (it should be compiled alongside this file)
     if (!fs.existsSync(hookScriptPath)) {
-      console.log(`[Claude Process] Hook script not found at ${hookScriptPath}, skipping hook configuration`);
+      console.log(`[Claude Process] Hook script not found, skipping hook configuration`);
       return;
     }
 
@@ -957,7 +1124,7 @@ class ClaudeProcessManager extends EventEmitter {
 
     try {
       // Create .claude dir if needed
-      fs.mkdirSync(claudeDir, { recursive: true });
+      fs.mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
 
       // Read existing settings or start fresh
       let settings: any = {};
@@ -989,9 +1156,9 @@ class ClaudeProcessManager extends EventEmitter {
         });
       }
 
-      fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2), 'utf-8');
+      fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2), { encoding: 'utf-8', mode: 0o600 });
       this.hookConfiguredDirs.add(cwd);
-      console.log(`[Claude Process] Hook configured in ${settingsFile}`);
+      console.log(`[Claude Process] Hook configured`);
     } catch (err) {
       console.log(`[Claude Process] Failed to configure hook: ${(err as Error).message}`);
     }
@@ -1023,11 +1190,11 @@ class ClaudeProcessManager extends EventEmitter {
       if (Object.keys(settings).length === 0) {
         fs.unlinkSync(settingsFile);
       } else {
-        fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2), 'utf-8');
+        fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2), { encoding: 'utf-8', mode: 0o600 });
       }
 
       this.hookConfiguredDirs.delete(cwd);
-      console.log(`[Claude Process] Hook removed from ${settingsFile}`);
+      console.log(`[Claude Process] Hook removed`);
     } catch (err) {
       console.log(`[Claude Process] Failed to remove hook: ${(err as Error).message}`);
     }
@@ -1150,11 +1317,15 @@ class ClaudeProcessManager extends EventEmitter {
           } else if (toolInput.pattern) {
             inputSummary = `Pattern: ${toolInput.pattern}`;
           } else {
-            inputSummary = JSON.stringify(toolInput).substring(0, 200);
+            try {
+              inputSummary = JSON.stringify(toolInput).substring(0, 200);
+            } catch {
+              inputSummary = '[unserializable input]';
+            }
           }
         }
 
-        console.log(`[Claude Process] Tool activity: ${toolName} (${toolId}) - ${inputSummary.substring(0, 80)}`);
+        console.log(`[Claude Process] Tool activity: ${toolName} (${toolId})`);
 
         // Emit non-blocking tool_activity event (not an approval request)
         const toolActivity: ToolActivityEvent = {
@@ -1221,7 +1392,7 @@ class ClaudeProcessManager extends EventEmitter {
     // SDK mode (stream-json) does not accept raw character input — writing 'y' or 'n'
     // to stdin would be interpreted as a malformed JSONL message, not an approval response.
     // The tool has already executed by the time the user sees the notification.
-    console.log(`[Claude Process] Approval response '${response}' for ${approvalId} ignored — SDK mode processes don't accept raw stdin approval characters`);
+    console.log(`[Claude Process] Approval response for ${approvalId} ignored — SDK mode processes don't accept raw stdin approval characters`);
   }
 
   /**
@@ -1377,7 +1548,7 @@ class ClaudeProcessManager extends EventEmitter {
           activeForm: input.activeForm,
         };
 
-        console.log(`[Claude Process] Task created: ${task.subject}`);
+        console.log(`[Claude Process] Task created: ${task.id || 'unknown'}`);
         this.emit('task_progress', {
           terminalSessionId,
           sessionKey,

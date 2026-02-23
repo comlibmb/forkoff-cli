@@ -7,4 +7,9 @@ tsconfig.json
 .claude/
 .env
 *.log
+*.map
 assets/
+__tests__/
+jest.config*
+coverage/
+docs/

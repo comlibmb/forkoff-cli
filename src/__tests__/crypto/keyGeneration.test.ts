@@ -1,4 +1,4 @@
-import { generateKeyPair, generateKeyPairFromSeed } from '../../crypto/keyGeneration';
+import { generateKeyPair } from '../../crypto/keyGeneration';
 
 describe('CLI Key Generation', () => {
   describe('generateKeyPair', () => {
@@ -49,34 +49,19 @@ describe('CLI Key Generation', () => {
       expect(keyPair1.publicKey).not.toBe(keyPair2.publicKey);
       expect(keyPair1.privateKey).not.toBe(keyPair2.privateKey);
     });
-  });
 
-  describe('generateKeyPairFromSeed', () => {
-    it('key pair generation is deterministic when given seed', () => {
-      const seed = Buffer.alloc(32, 1); // All bytes set to 1
+    it('key pair is compatible with nacl.box.keyPair', () => {
+      const nacl = require('tweetnacl');
+      const { decodeBase64 } = require('tweetnacl-util');
 
-      const keyPair1 = generateKeyPairFromSeed(seed);
-      const keyPair2 = generateKeyPairFromSeed(seed);
+      const keyPair = generateKeyPair();
 
-      expect(keyPair1.publicKey).toBe(keyPair2.publicKey);
-      expect(keyPair1.privateKey).toBe(keyPair2.privateKey);
-    });
+      // Should be able to recreate the key pair from secret key
+      const secretKey = decodeBase64(keyPair.privateKey);
+      const derived = nacl.box.keyPair.fromSecretKey(secretKey);
 
-    it('different seeds produce different keys', () => {
-      const seed1 = Buffer.alloc(32, 1);
-      const seed2 = Buffer.alloc(32, 2);
-
-      const keyPair1 = generateKeyPairFromSeed(seed1);
-      const keyPair2 = generateKeyPairFromSeed(seed2);
-
-      expect(keyPair1.publicKey).not.toBe(keyPair2.publicKey);
-      expect(keyPair1.privateKey).not.toBe(keyPair2.privateKey);
-    });
-
-    it('seed must be 32 bytes', () => {
-      const shortSeed = Buffer.alloc(16);
-
-      expect(() => generateKeyPairFromSeed(shortSeed)).toThrow();
+      const { encodeBase64 } = require('tweetnacl-util');
+      expect(encodeBase64(derived.publicKey)).toBe(keyPair.publicKey);
     });
   });
 });

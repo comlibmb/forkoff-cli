@@ -125,7 +125,7 @@ class ClaudeSessionDetector extends EventEmitter {
         }
       }
     } catch (error) {
-      console.error('[ClaudeSessionDetector] Error scanning sessions:', error);
+      console.error('[ClaudeSessionDetector] Error scanning sessions:', (error as Error).message);
     }
 
     // Sort by lastUsedAt descending

@@ -1,7 +1,7 @@
 import { encrypt, decrypt } from '../../crypto/encryption';
 
 describe('CLI Encryption/Decryption', () => {
-  const testKey = new Uint8Array(32).fill(1); // 32-byte AES-256 key
+  const testKey = new Uint8Array(32).fill(1); // 32-byte NaCl secretbox key
 
   describe('Basic Encryption', () => {
     it('encrypts plaintext to EncryptedPayload', () => {
@@ -11,28 +11,19 @@ describe('CLI Encryption/Decryption', () => {
 
       expect(encrypted).toHaveProperty('ciphertext');
       expect(encrypted).toHaveProperty('nonce');
-      expect(encrypted).toHaveProperty('authTag');
       expect(typeof encrypted.ciphertext).toBe('string');
       expect(typeof encrypted.nonce).toBe('string');
-      expect(typeof encrypted.authTag).toBe('string');
+      // NaCl secretbox does NOT have a separate authTag — it's embedded in ciphertext
+      expect(encrypted).not.toHaveProperty('authTag');
     });
 
-    it('nonce is 12 bytes', () => {
+    it('nonce is 24 bytes (NaCl secretbox nonce)', () => {
       const plaintext = 'Test message';
 
       const encrypted = encrypt(plaintext, testKey);
       const nonceBytes = Buffer.from(encrypted.nonce, 'base64');
 
-      expect(nonceBytes.length).toBe(12);
-    });
-
-    it('authTag is 16 bytes', () => {
-      const plaintext = 'Test message';
-
-      const encrypted = encrypt(plaintext, testKey);
-      const authTagBytes = Buffer.from(encrypted.authTag, 'base64');
-
-      expect(authTagBytes.length).toBe(16);
+      expect(nonceBytes.length).toBe(24);
     });
 
     it('encrypted ciphertext is different from plaintext', () => {
@@ -133,18 +124,6 @@ describe('CLI Encryption/Decryption', () => {
       const tamperedNonce = Buffer.from(encrypted.nonce, 'base64');
       tamperedNonce[0] ^= 0xFF;
       encrypted.nonce = tamperedNonce.toString('base64');
-
-      expect(() => decrypt(encrypted, testKey)).toThrow();
-    });
-
-    it('decryption with tampered authTag fails', () => {
-      const plaintext = 'Secret message';
-      const encrypted = encrypt(plaintext, testKey);
-
-      // Tamper with authTag
-      const tamperedAuthTag = Buffer.from(encrypted.authTag, 'base64');
-      tamperedAuthTag[0] ^= 0xFF;
-      encrypted.authTag = tamperedAuthTag.toString('base64');
 
       expect(() => decrypt(encrypted, testKey)).toThrow();
     });

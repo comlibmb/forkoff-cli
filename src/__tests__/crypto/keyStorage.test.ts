@@ -92,32 +92,38 @@ describe('CLI Key Storage', () => {
   });
 
   describe('Session Key Storage (In-Memory)', () => {
-    it('stores session keys in memory', () => {
+    it('stores session keys in memory with NaCl SessionKeys shape', () => {
       const deviceId = 'device-456';
-      const sessionKey = new Uint8Array(32).fill(1);
+      const sharedKey = new Uint8Array(32).fill(1);
       const sessionId = 'session-abc';
 
-      storeSessionKey(deviceId, sessionKey, sessionId);
+      storeSessionKey(deviceId, sharedKey, sessionId);
 
       const retrieved = getSessionKey(deviceId);
 
       expect(retrieved).toEqual({
-        encryptionKey: sessionKey,
+        sharedKey,
         sessionId,
+        deviceId,
+        messageCounter: 0,
+        lastReceivedCounter: -1,
       });
     });
 
     it('retrieves session keys by device ID', () => {
       const deviceId = 'device-456';
-      const sessionKey = new Uint8Array(32).fill(2);
+      const sharedKey = new Uint8Array(32).fill(2);
       const sessionId = 'session-xyz';
 
-      storeSessionKey(deviceId, sessionKey, sessionId);
+      storeSessionKey(deviceId, sharedKey, sessionId);
 
       const retrieved = getSessionKey(deviceId);
 
-      expect(retrieved?.encryptionKey).toEqual(sessionKey);
+      expect(retrieved?.sharedKey).toEqual(sharedKey);
       expect(retrieved?.sessionId).toBe(sessionId);
+      expect(retrieved?.deviceId).toBe(deviceId);
+      expect(retrieved?.messageCounter).toBe(0);
+      expect(retrieved?.lastReceivedCounter).toBe(-1);
     });
 
     it('returns null for non-existent session keys', () => {
@@ -149,7 +155,7 @@ describe('CLI Key Storage', () => {
 
       const retrieved = getSessionKey(deviceId);
 
-      expect(retrieved?.encryptionKey).toEqual(secondKey);
+      expect(retrieved?.sharedKey).toEqual(secondKey);
       expect(retrieved?.sessionId).toBe('session-2');
     });
   });

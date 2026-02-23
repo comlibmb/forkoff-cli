@@ -23,6 +23,32 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
+function safeReadFile(filePath: string): string | null {
+  try {
+    const stat = fs.lstatSync(filePath);
+    if (stat.isSymbolicLink()) {
+      console.error(`[Security] Symlink detected, refusing to read: ${filePath}`);
+      return null;
+    }
+    return fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+function safeWriteFile(filePath: string, content: string): boolean {
+  try {
+    // SECURITY: Atomic write via temp file + rename to prevent TOCTOU symlink attacks
+    const tmpPath = filePath + '.tmp.' + process.pid;
+    fs.writeFileSync(tmpPath, content, { encoding: 'utf-8', mode: 0o600 });
+    fs.renameSync(tmpPath, filePath);
+    return true;
+  } catch (err) {
+    console.error(`[Security] Failed to write file safely`, (err as Error).message);
+    return false;
+  }
+}
+
 interface PendingPromptInfo {
   promptId: string;
   terminalSessionId: string;
@@ -54,6 +80,7 @@ class PermissionIpcManager extends EventEmitter {
   private readonly POLL_INTERVAL_MS = 200; // poll every 200ms
   private readonly TEMP_DIR = path.join(os.tmpdir(), 'forkoff-permissions');
   private processedFiles: Set<string> = new Set();
+  private static readonly MAX_PROCESSED_FILES = 500; // Cap to prevent memory DoS
 
   /** Currently tracked terminal session ID */
   private terminalSessionId: string = '';
@@ -89,7 +116,7 @@ class PermissionIpcManager extends EventEmitter {
 
     // Ensure temp directory exists
     try {
-      fs.mkdirSync(this.TEMP_DIR, { recursive: true });
+      fs.mkdirSync(this.TEMP_DIR, { recursive: true, mode: 0o700 });
     } catch (err) {
       console.log(`[Permission IPC] Failed to create temp dir ${this.TEMP_DIR}: ${(err as Error).message}`);
     }
@@ -152,11 +179,10 @@ class PermissionIpcManager extends EventEmitter {
       responseData.reason = reason;
     }
 
-    try {
-      fs.writeFileSync(responseFile, JSON.stringify(responseData), 'utf-8');
+    if (safeWriteFile(responseFile, JSON.stringify(responseData))) {
       console.log(`[Permission IPC] Wrote response for ${promptId}: ${decision}${reason ? ` (${reason})` : ''}`);
-    } catch (err) {
-      console.log(`[Permission IPC] Failed to write response file ${responseFile}: ${(err as Error).message}`);
+    } else {
+      console.log(`[Permission IPC] Failed to write response file ${responseFile}`);
     }
   }
 
@@ -183,10 +209,19 @@ class PermissionIpcManager extends EventEmitter {
       const filePath = path.join(this.TEMP_DIR, file);
 
       try {
-        const content = fs.readFileSync(filePath, 'utf-8');
+        const content = safeReadFile(filePath);
+        if (content === null) {
+          this.processedFiles.add(file);
+          console.log(`[Permission IPC] Skipped unreadable request file ${file}`);
+          continue;
+        }
         const request = JSON.parse(content);
 
-        // Mark as processed to avoid duplicate handling
+        // Mark as processed to avoid duplicate handling (evict oldest if at cap)
+        if (this.processedFiles.size >= PermissionIpcManager.MAX_PROCESSED_FILES) {
+          const oldest = this.processedFiles.values().next().value;
+          if (oldest) this.processedFiles.delete(oldest);
+        }
         this.processedFiles.add(file);
 
         const promptId = request.promptId || file.replace('.request.json', '');
@@ -226,6 +261,10 @@ class PermissionIpcManager extends EventEmitter {
       } catch (err) {
         // File might be partially written or malformed — skip it for now
         // but add to processed so we don't retry every poll cycle
+        if (this.processedFiles.size >= PermissionIpcManager.MAX_PROCESSED_FILES) {
+          const oldest = this.processedFiles.values().next().value;
+          if (oldest) this.processedFiles.delete(oldest);
+        }
         this.processedFiles.add(file);
         console.log(`[Permission IPC] Failed to read request file ${file}: ${(err as Error).message}`);
       }
@@ -265,17 +304,24 @@ class PermissionIpcManager extends EventEmitter {
   cleanup(): void {
     this.stop();
 
-    // Try to clean up remaining temp files in the directory
+    // Try to clean up remaining request/response temp files in the directory
     try {
       const files = fs.readdirSync(this.TEMP_DIR);
-      for (const file of files) {
+      const ipcFiles = files.filter(
+        (f) => f.endsWith('.request.json') || f.endsWith('.response.json'),
+      );
+      for (const file of ipcFiles) {
         try {
-          fs.unlinkSync(path.join(this.TEMP_DIR, file));
+          const filePath = path.join(this.TEMP_DIR, file);
+          const stat = fs.lstatSync(filePath);
+          if (stat.isFile() && !stat.isSymbolicLink()) {
+            fs.unlinkSync(filePath);
+          }
         } catch (err) {
           // File may already be deleted by the hook script — ignore
         }
       }
-      console.log(`[Permission IPC] Cleaned up ${files.length} temp file(s)`);
+      console.log(`[Permission IPC] Cleaned up ${ipcFiles.length} temp file(s)`);
     } catch (err) {
       // Directory might not exist — that's fine
       console.log(`[Permission IPC] Temp dir cleanup skipped: ${(err as Error).message}`);
@@ -295,12 +341,16 @@ class PermissionIpcManager extends EventEmitter {
       return;
     }
 
+    const ipcFiles = files.filter(
+      (f) => f.endsWith('.request.json') || f.endsWith('.response.json'),
+    );
+
     let cleaned = 0;
-    for (const file of files) {
+    for (const file of ipcFiles) {
       const filePath = path.join(tempDir, file);
       try {
-        const stat = fs.statSync(filePath);
-        if (stat.isFile()) {
+        const stat = fs.lstatSync(filePath);
+        if (stat.isFile() && !stat.isSymbolicLink()) {
           fs.unlinkSync(filePath);
           cleaned++;
         }

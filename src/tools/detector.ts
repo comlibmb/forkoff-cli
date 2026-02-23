@@ -8,7 +8,7 @@
  * - Continue.dev (VS Code extension)
  */
 
-import { execSync, spawn } from 'child_process';
+import { execSync, spawnSync, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -346,12 +346,15 @@ class ToolDetector {
   private findCommand(command: string): string | null {
     try {
       const cmd = this.platform === 'windows' ? 'where' : 'which';
-      const result = execSync(`${cmd} ${command}`, {
+      const result = spawnSync(cmd, [command], {
         encoding: 'utf8',
         timeout: 5000,
         stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim();
-      return result.split('\n')[0] || null;
+      });
+      if (result.status === 0 && result.stdout) {
+        return result.stdout.trim().split('\n')[0] || null;
+      }
+      return null;
     } catch {
       return null;
     }
@@ -361,6 +364,12 @@ class ToolDetector {
    * Check if a process is running
    */
   private isProcessRunning(processName: string): boolean {
+    // Validate processName to prevent command injection
+    const SAFE_PROCESS_NAME = /^[a-zA-Z0-9_-]+$/;
+    if (!SAFE_PROCESS_NAME.test(processName)) {
+      return false;
+    }
+
     try {
       let cmd: string;
 

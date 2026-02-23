@@ -94,7 +94,7 @@ export async function disableStartup(): Promise<void> {
 async function enableStartupWindows(binaryPath: string): Promise<void> {
   const startupDir = getStartupDir();
   if (!fs.existsSync(startupDir)) {
-    fs.mkdirSync(startupDir, { recursive: true });
+    fs.mkdirSync(startupDir, { recursive: true, mode: 0o700 });
   }
 
   // Resolve binaryPath to the .cmd shim if it exists (npm global installs create .cmd on Windows)
@@ -106,12 +106,23 @@ async function enableStartupWindows(binaryPath: string): Promise<void> {
     }
   }
 
+  // SECURITY: Validate binary path exists
+  if (!fs.existsSync(cmdPath)) {
+    throw new Error(`Startup binary not found: ${cmdPath}`);
+  }
+
+  // SECURITY: Reject paths with VBScript metacharacters to prevent injection
+  if (/[^a-zA-Z0-9_\-./\\ :]/.test(cmdPath)) {
+    throw new Error(`Startup binary path contains disallowed characters: ${cmdPath}`);
+  }
+
   // Write a .vbs (VBScript) wrapper that launches the command with a hidden window.
   // A .bat would open a visible cmd.exe window on every login — bad UX.
   // WScript.Shell.Run with windowStyle 0 = hidden, False = don't wait.
   const vbsPath = getVbsPath();
-  const vbsContent = `CreateObject("WScript.Shell").Run """${cmdPath}"" connect --quiet", 0, False\r\n`;
-  fs.writeFileSync(vbsPath, vbsContent);
+  const escapedPath = cmdPath.replace(/"/g, '""');
+  const vbsContent = `CreateObject("WScript.Shell").Run """${escapedPath}"" connect --quiet", 0, False\r\n`;
+  fs.writeFileSync(vbsPath, vbsContent, { mode: 0o600 });
 
   // Use HKCU Run key — no admin required, runs on user logon
   execSync(
@@ -148,7 +159,7 @@ async function enableStartupMacOS(binaryPath: string): Promise<void> {
 
   const configDir = path.join(os.homedir(), '.config', 'forkoff-cli');
   if (!fs.existsSync(configDir)) {
-    fs.mkdirSync(configDir, { recursive: true });
+    fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
   }
 
   // Use the current node binary explicitly as the first ProgramArgument.
@@ -200,10 +211,10 @@ async function enableStartupMacOS(binaryPath: string): Promise<void> {
   const plistPath = getPlistPath();
   const launchAgentsDir = path.dirname(plistPath);
   if (!fs.existsSync(launchAgentsDir)) {
-    fs.mkdirSync(launchAgentsDir, { recursive: true });
+    fs.mkdirSync(launchAgentsDir, { recursive: true, mode: 0o700 });
   }
 
-  fs.writeFileSync(plistPath, plist);
+  fs.writeFileSync(plistPath, plist, { mode: 0o600 });
 
   try {
     execSync(`launchctl load "${plistPath}"`, { stdio: 'pipe' });

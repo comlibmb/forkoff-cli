@@ -13,6 +13,7 @@ export interface PendingApproval {
 }
 
 class ApprovalManager extends EventEmitter {
+  private static readonly MAX_PENDING_APPROVALS = 50;
   private pendingApprovals: Map<string, PendingApproval> = new Map();
   private approvalCounter = 0;
 
@@ -38,6 +39,13 @@ class ApprovalManager extends EventEmitter {
       createdAt: new Date(),
       status: 'pending',
     };
+
+    // Evict oldest if at cap
+    while (this.pendingApprovals.size >= ApprovalManager.MAX_PENDING_APPROVALS) {
+      const oldestKey = this.pendingApprovals.keys().next().value;
+      if (oldestKey) this.pendingApprovals.delete(oldestKey);
+      else break;
+    }
 
     this.pendingApprovals.set(id, approval);
 

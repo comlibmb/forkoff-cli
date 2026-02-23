@@ -5,37 +5,22 @@ import * as keyGeneration from '../../crypto/keyGeneration';
 // Mock keytar to avoid actual OS keychain operations
 jest.mock('keytar');
 
-// Mock axios for API calls
-jest.mock('axios');
-import axios from 'axios';
-const mockAxios = axios as jest.Mocked<typeof axios>;
+// Mock sessionPersistence to avoid disk I/O during tests
+jest.mock('../../crypto/sessionPersistence', () => ({
+  persistSessionKey: jest.fn(),
+  loadPersistedSessionKey: jest.fn().mockReturnValue(null),
+  deletePersistedSession: jest.fn(),
+  deleteAllPersistedSessions: jest.fn(),
+  listPersistedSessions: jest.fn().mockReturnValue([]),
+}));
 
 describe('CLI E2EE Manager', () => {
   let manager: E2EEManager;
   const deviceId = 'device-123';
-  const apiUrl = 'https://api.forkoff.app/api';
-
-  // Mock axios instance
-  const mockAxiosInstance = {
-    put: jest.fn(),
-    get: jest.fn(),
-  };
 
   beforeEach(async () => {
     jest.clearAllMocks();
     keyStorage.clearSessionKeys();
-
-    // Mock axios.create to return our mock instance
-    mockAxios.create = jest.fn().mockReturnValue(mockAxiosInstance as any);
-
-    // Mock successful API responses
-    mockAxiosInstance.put.mockResolvedValue({ data: { success: true, keyVersion: 1 } });
-    mockAxiosInstance.get.mockResolvedValue({
-      data: {
-        publicKey: 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=',
-        keyVersion: 1,
-      },
-    });
   });
 
   describe('Initialization', () => {
@@ -45,7 +30,7 @@ describe('CLI E2EE Manager', () => {
         .spyOn(keyStorage, 'storePrivateKey')
         .mockResolvedValue();
 
-      manager = new E2EEManager(deviceId, apiUrl, 'mock-token');
+      manager = new E2EEManager(deviceId);
       await manager.initialize();
 
       expect(storeKeySpy).toHaveBeenCalled();
@@ -53,13 +38,14 @@ describe('CLI E2EE Manager', () => {
     });
 
     it('initializes with stored keys if they exist', async () => {
-      const existingPrivateKey = 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=';
+      // Generate a real key pair to get a valid private key
+      const realKeyPair = keyGeneration.generateKeyPair();
       jest
         .spyOn(keyStorage, 'getPrivateKey')
-        .mockResolvedValue(existingPrivateKey);
+        .mockResolvedValue(realKeyPair.privateKey);
       const generateSpy = jest.spyOn(keyGeneration, 'generateKeyPair');
 
-      manager = new E2EEManager(deviceId, apiUrl, 'mock-token');
+      manager = new E2EEManager(deviceId);
       await manager.initialize();
 
       // Should NOT generate new keys
@@ -67,17 +53,19 @@ describe('CLI E2EE Manager', () => {
       expect(manager.isInitialized()).toBe(true);
     });
 
-    it('uploads public key to backend on initialization', async () => {
+    it('public key is available after initialization', async () => {
       jest.spyOn(keyStorage, 'getPrivateKey').mockResolvedValue(null);
       jest.spyOn(keyStorage, 'storePrivateKey').mockResolvedValue();
 
-      manager = new E2EEManager(deviceId, apiUrl, 'mock-token');
+      manager = new E2EEManager(deviceId);
       await manager.initialize();
 
-      expect(mockAxiosInstance.put).toHaveBeenCalledWith(
-        `${apiUrl}/devices/${deviceId}/public-key`,
-        expect.objectContaining({ publicKey: expect.any(String) })
-      );
+      const publicKey = manager.getPublicKey();
+      expect(publicKey).toBeDefined();
+      expect(typeof publicKey).toBe('string');
+      // Should be a valid Base64 string decoding to 32 bytes
+      const publicKeyBytes = Buffer.from(publicKey!, 'base64');
+      expect(publicKeyBytes.length).toBe(32);
     });
   });
 
@@ -86,65 +74,91 @@ describe('CLI E2EE Manager', () => {
       jest.spyOn(keyStorage, 'getPrivateKey').mockResolvedValue(null);
       jest.spyOn(keyStorage, 'storePrivateKey').mockResolvedValue();
 
-      manager = new E2EEManager(deviceId, apiUrl, 'mock-token');
+      manager = new E2EEManager(deviceId);
       await manager.initialize();
     });
 
-    it('initiates key exchange with target device', async () => {
+    it('creates key exchange init with target device', () => {
       const targetDeviceId = 'device-456';
 
-      const initPayload = await manager.initiateKeyExchange(targetDeviceId);
+      const initPayload = manager.createKeyExchangeInit(targetDeviceId);
 
       expect(initPayload).toHaveProperty('senderDeviceId', deviceId);
       expect(initPayload).toHaveProperty('ephemeralPublicKey');
       expect(typeof initPayload.ephemeralPublicKey).toBe('string');
     });
 
-    it('handles incoming key exchange init', async () => {
+    it('handles incoming key exchange init', () => {
       const senderDeviceId = 'device-456';
-      const ephemeralPublicKey = 'AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=';
+      const senderManager = new E2EEManager(senderDeviceId);
 
-      const ackPayload = await manager.handleKeyExchangeInit(
+      // Generate a real ephemeral key pair for the sender
+      const senderEphemeral = keyGeneration.generateKeyPair();
+
+      const ackPayload = manager.handleKeyExchangeInit({
         senderDeviceId,
-        ephemeralPublicKey
-      );
+        ephemeralPublicKey: senderEphemeral.publicKey,
+      });
 
-      expect(ackPayload).toHaveProperty('recipientDeviceId', deviceId);
+      expect(ackPayload).toHaveProperty('recipientDeviceId', senderDeviceId);
       expect(ackPayload).toHaveProperty('ephemeralPublicKey');
       expect(manager.hasSessionKey(senderDeviceId)).toBe(true);
     });
 
-    it('handles incoming key exchange ack', async () => {
+    it('handles incoming key exchange ack', () => {
       const targetDeviceId = 'device-456';
 
-      // First initiate
-      await manager.initiateKeyExchange(targetDeviceId);
+      // First create init (stores pending ephemeral key)
+      manager.createKeyExchangeInit(targetDeviceId);
+
+      // Generate a real ephemeral key pair for the responder
+      const responderEphemeral = keyGeneration.generateKeyPair();
 
       // Then handle ack
-      const ephemeralPublicKey = 'AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=';
-      await manager.handleKeyExchangeAck(targetDeviceId, ephemeralPublicKey);
+      manager.handleKeyExchangeAck({
+        senderDeviceId: targetDeviceId,
+        recipientDeviceId: deviceId,
+        ephemeralPublicKey: responderEphemeral.publicKey,
+      });
 
       expect(manager.hasSessionKey(targetDeviceId)).toBe(true);
+    });
+
+    it('throws on ack without pending exchange', () => {
+      const unknownDeviceId = 'unknown-device';
+      const ephemeral = keyGeneration.generateKeyPair();
+
+      expect(() =>
+        manager.handleKeyExchangeAck({
+          senderDeviceId: unknownDeviceId,
+          recipientDeviceId: deviceId,
+          ephemeralPublicKey: ephemeral.publicKey,
+        })
+      ).toThrow(/No pending key exchange/);
     });
   });
 
   describe('Message Encryption', () => {
+    let targetManager: E2EEManager;
+    const targetDeviceId = 'device-456';
+
     beforeEach(async () => {
       jest.spyOn(keyStorage, 'getPrivateKey').mockResolvedValue(null);
       jest.spyOn(keyStorage, 'storePrivateKey').mockResolvedValue();
 
-      manager = new E2EEManager(deviceId, apiUrl, 'mock-token');
+      manager = new E2EEManager(deviceId);
       await manager.initialize();
 
-      // Set up session
-      const targetDeviceId = 'device-456';
-      await manager.initiateKeyExchange(targetDeviceId);
-      const ephemeralPublicKey = 'AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=';
-      await manager.handleKeyExchangeAck(targetDeviceId, ephemeralPublicKey);
+      // Complete a real key exchange between two managers
+      targetManager = new E2EEManager(targetDeviceId);
+      await targetManager.initialize();
+
+      const initPayload = manager.createKeyExchangeInit(targetDeviceId);
+      const ackPayload = targetManager.handleKeyExchangeInit(initPayload);
+      manager.handleKeyExchangeAck(ackPayload);
     });
 
     it('encrypts outgoing messages', () => {
-      const targetDeviceId = 'device-456';
       const plaintext = 'Hello, World!';
       const sessionId = 'session-abc';
 
@@ -160,13 +174,13 @@ describe('CLI E2EE Manager', () => {
       expect(encryptedMessage).toHaveProperty('payload');
       expect(encryptedMessage.payload).toHaveProperty('ciphertext');
       expect(encryptedMessage.payload).toHaveProperty('nonce');
-      expect(encryptedMessage.payload).toHaveProperty('authTag');
+      // NaCl secretbox does NOT have a separate authTag
+      expect(encryptedMessage.payload).not.toHaveProperty('authTag');
       expect(encryptedMessage).toHaveProperty('messageCounter');
       expect(encryptedMessage).toHaveProperty('timestamp');
     });
 
     it('increments message counter on send', () => {
-      const targetDeviceId = 'device-456';
       const sessionId = 'session-abc';
 
       const msg1 = manager.encryptMessage('Message 1', targetDeviceId, sessionId);
@@ -174,58 +188,58 @@ describe('CLI E2EE Manager', () => {
 
       expect(msg2.messageCounter).toBe(msg1.messageCounter + 1);
     });
+
+    it('throws when no session key exists for target', () => {
+      const unknownDeviceId = 'unknown-device';
+
+      expect(() =>
+        manager.encryptMessage('Hello', unknownDeviceId, 'session-123')
+      ).toThrow(/No session established/);
+    });
   });
 
   describe('Message Decryption', () => {
+    let senderManager: E2EEManager;
+    const senderDeviceId = 'device-456';
+
     beforeEach(async () => {
       jest.spyOn(keyStorage, 'getPrivateKey').mockResolvedValue(null);
       jest.spyOn(keyStorage, 'storePrivateKey').mockResolvedValue();
 
-      manager = new E2EEManager(deviceId, apiUrl, 'mock-token');
+      manager = new E2EEManager(deviceId);
       await manager.initialize();
 
-      // Set up session (as recipient)
-      const senderDeviceId = 'device-456';
-      const ephemeralPublicKey = 'AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=';
-      await manager.handleKeyExchangeInit(senderDeviceId, ephemeralPublicKey);
+      senderManager = new E2EEManager(senderDeviceId);
+      await senderManager.initialize();
+
+      // Complete key exchange: sender initiates, manager (recipient) responds
+      const initPayload = senderManager.createKeyExchangeInit(deviceId);
+      const ackPayload = manager.handleKeyExchangeInit(initPayload);
+      senderManager.handleKeyExchangeAck(ackPayload);
     });
 
     it('decrypts incoming messages', () => {
-      const senderDeviceId = 'device-456';
       const plaintext = 'Secret message';
       const sessionId = 'session-abc';
 
-      // Get the session key
-      const sessionKeys = keyStorage.getSessionKey(senderDeviceId);
-      if (!sessionKeys) {
-        throw new Error('Session key not found');
-      }
+      // Sender encrypts a message
+      const encryptedMessage = senderManager.encryptMessage(
+        plaintext,
+        deviceId,
+        sessionId
+      );
 
-      // Manually create an encrypted message (simulating what the sender would send)
-      const { encrypt } = require('../../crypto/encryption');
-      const encryptedPayload = encrypt(plaintext, sessionKeys.encryptionKey);
-
-      const encryptedMessage = {
-        senderDeviceId,
-        recipientDeviceId: deviceId,
-        sessionId,
-        payload: encryptedPayload,
-        messageCounter: 1, // First message from sender
-        timestamp: new Date().toISOString(),
-      };
-
-      // Decrypt (simulating receiving from sender)
+      // Recipient decrypts
       const decrypted = manager.decryptMessage(encryptedMessage, senderDeviceId);
 
       expect(decrypted).toBe(plaintext);
     });
 
     it('rejects messages with invalid counter (replay protection)', () => {
-      const senderDeviceId = 'device-456';
       const sessionId = 'session-abc';
 
-      const msg1 = manager.encryptMessage('Message 1', senderDeviceId, sessionId);
-      const msg2 = manager.encryptMessage('Message 2', senderDeviceId, sessionId);
+      const msg1 = senderManager.encryptMessage('Message 1', deviceId, sessionId);
+      const msg2 = senderManager.encryptMessage('Message 2', deviceId, sessionId);
 
       // Decrypt msg2 first
       manager.decryptMessage(msg2, senderDeviceId);
@@ -242,22 +256,27 @@ describe('CLI E2EE Manager', () => {
       jest.spyOn(keyStorage, 'getPrivateKey').mockResolvedValue(null);
       jest.spyOn(keyStorage, 'storePrivateKey').mockResolvedValue();
 
-      manager = new E2EEManager(deviceId, apiUrl, 'mock-token');
+      manager = new E2EEManager(deviceId);
       await manager.initialize();
     });
 
-    it('tracks active sessions by device ID', async () => {
+    it('tracks active sessions by device ID', () => {
       const device1 = 'device-456';
       const device2 = 'device-789';
 
-      await manager.initiateKeyExchange(device1);
-      await manager.initiateKeyExchange(device2);
+      // Complete key exchanges for both devices
+      const ephemeral1 = keyGeneration.generateKeyPair();
+      const ephemeral2 = keyGeneration.generateKeyPair();
 
-      const ephemeralKey1 = 'AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=';
-      const ephemeralKey2 = 'AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=';
+      manager.handleKeyExchangeInit({
+        senderDeviceId: device1,
+        ephemeralPublicKey: ephemeral1.publicKey,
+      });
 
-      await manager.handleKeyExchangeAck(device1, ephemeralKey1);
-      await manager.handleKeyExchangeAck(device2, ephemeralKey2);
+      manager.handleKeyExchangeInit({
+        senderDeviceId: device2,
+        ephemeralPublicKey: ephemeral2.publicKey,
+      });
 
       expect(manager.hasSessionKey(device1)).toBe(true);
       expect(manager.hasSessionKey(device2)).toBe(true);
@@ -265,14 +284,18 @@ describe('CLI E2EE Manager', () => {
 
     it('cleans up session keys on disconnect', () => {
       const targetDeviceId = 'device-456';
-      keyStorage.storeSessionKey(
-        targetDeviceId,
-        new Uint8Array(32),
-        'session-abc'
-      );
+      const ephemeral = keyGeneration.generateKeyPair();
+
+      manager.handleKeyExchangeInit({
+        senderDeviceId: targetDeviceId,
+        ephemeralPublicKey: ephemeral.publicKey,
+      });
+
+      expect(manager.hasSessionKey(targetDeviceId)).toBe(true);
 
       manager.cleanup();
 
+      expect(manager.hasSessionKey(targetDeviceId)).toBe(false);
       expect(keyStorage.getSessionKey(targetDeviceId)).toBeNull();
     });
   });
