@@ -26,6 +26,7 @@ import {
   loadTrustedPeerKeys,
   getTrustedPeerKey,
   trustPeerKey,
+  removeTrustedPeerKey,
 } from './keyStorage';
 import {
   initSessionPersistence,
@@ -171,11 +172,14 @@ export class E2EEManager {
     // Verify the Ed25519 signature
     const parts = [prefix, peerId, ephemeralPublicKey];
     if (recipientDeviceId) parts.push(recipientDeviceId);
-    const message = decodeUTF8(parts.join(':'));
+    const msgString = parts.join(':');
+    console.log(`[E2EE-DIAG] verifyPeerSignature: msg="${msgString.substring(0, 100)}..." idPub=${identityPublicKey.substring(0, 12)}... sig=${signature.substring(0, 12)}...`);
+    const message = decodeUTF8(msgString);
     const sigBytes = decodeBase64(signature);
     const pubKeyBytes = decodeBase64(identityPublicKey);
 
     const valid = nacl.sign.detached.verify(message, sigBytes, pubKeyBytes);
+    console.log(`[E2EE-DIAG] verifyPeerSignature result: ${valid}`);
     if (!valid) {
       throw new Error(
         `E2EE: INVALID SIGNATURE from device ${peerId}! ` +
@@ -285,6 +289,7 @@ export class E2EEManager {
    */
   handleKeyExchangeAck(ack: KeyExchangeAck): void {
     const peerId = ack.senderDeviceId;
+    console.log(`[E2EE-DIAG] handleKeyExchangeAck received: sender=${peerId?.substring(0, 20)}... recipient=${ack.recipientDeviceId?.substring(0, 20)}... ephPub=${ack.ephemeralPublicKey?.substring(0, 12)}... idPub=${ack.identityPublicKey?.substring(0, 12)}... sig=${ack.signature?.substring(0, 12)}...`);
     const pendingEntry = this.pendingExchanges.get(peerId);
     if (!pendingEntry) {
       throw new Error(`E2EE: No pending key exchange for device ${peerId}`);
@@ -432,5 +437,18 @@ export class E2EEManager {
   /** Removes a specific persisted session */
   removePersistedSession(targetDeviceId: string): void {
     deletePersistedSession(this.deviceId, targetDeviceId);
+  }
+
+  /** Reset TOFU trust for a peer (used on re-pair so new keys are accepted) */
+  resetPeerTrust(targetDeviceId: string): void {
+    removeTrustedPeerKey(targetDeviceId);
+    this.sessions.delete(targetDeviceId);
+    this.pendingExchanges.delete(targetDeviceId);
+    deletePersistedSession(this.deviceId, targetDeviceId);
+  }
+
+  /** Light trust reset — only clears TOFU key, preserves pending exchanges in-flight */
+  clearTrustOnly(targetDeviceId: string): void {
+    removeTrustedPeerKey(targetDeviceId);
   }
 }

@@ -1088,11 +1088,14 @@ class ClaudeProcessManager extends EventEmitter {
         fs.mkdirSync(rulesDir, { recursive: true, mode: 0o700 });
       } else {
         // SECURITY: Validate temp dir permissions aren't world-writable
-        const dirStat = fs.statSync(rulesDir);
-        const dirMode = dirStat.mode & 0o777;
-        if (dirMode & 0o022) { // group or other writable
-          console.error(`[Security] Temp dir has unsafe permissions (${dirMode.toString(8)}), refusing to write`);
-          return;
+        // Skip on Windows — Unix permission bits aren't enforced and produce false positives
+        if (process.platform !== 'win32') {
+          const dirStat = fs.statSync(rulesDir);
+          const dirMode = dirStat.mode & 0o777;
+          if (dirMode & 0o022) { // group or other writable
+            console.error(`[Security] Temp dir has unsafe permissions (${dirMode.toString(8)}), refusing to write`);
+            return;
+          }
         }
       }
 

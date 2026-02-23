@@ -150,11 +150,14 @@ function ensureTempDir(): void {
     fs.mkdirSync(TEMP_DIR, { recursive: true, mode: 0o700 });
   } else {
     // SECURITY: Validate existing dir isn't world/group-writable (attacker pre-creation)
-    const stat = fs.statSync(TEMP_DIR);
-    const mode = stat.mode & 0o777;
-    if (mode & 0o022) { // group or other writable
-      console.error(`[Security] Temp dir has unsafe permissions (${mode.toString(8)}), aborting`);
-      respond('deny', 'Permission temp directory has unsafe permissions');
+    // Skip on Windows — Unix permission bits aren't enforced and produce false positives
+    if (process.platform !== 'win32') {
+      const stat = fs.statSync(TEMP_DIR);
+      const mode = stat.mode & 0o777;
+      if (mode & 0o022) { // group or other writable
+        console.error(`[Security] Temp dir has unsafe permissions (${mode.toString(8)}), aborting`);
+        respond('deny', 'Permission temp directory has unsafe permissions');
+      }
     }
   }
 }

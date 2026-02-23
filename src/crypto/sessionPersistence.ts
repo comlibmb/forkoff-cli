@@ -32,11 +32,13 @@ function ensureSessionStoreExists(): void {
   if (!fs.existsSync(SESSION_STORE_DIR)) {
     fs.mkdirSync(SESSION_STORE_DIR, { recursive: true, mode: 0o700 });
   } else {
-    // SECURITY: Validate existing dir isn't world/group-writable (attacker pre-creation)
-    const stat = fs.statSync(SESSION_STORE_DIR);
-    const mode = stat.mode & 0o777;
-    if (mode & 0o022) { // group or other writable
-      throw new Error(`Session store has unsafe permissions (${mode.toString(8)})`);
+    // SECURITY: Validate existing dir isn't world/group-writable (non-Windows only)
+    if (process.platform !== 'win32') {
+      const stat = fs.statSync(SESSION_STORE_DIR);
+      const mode = stat.mode & 0o777;
+      if (mode & 0o022) { // group or other writable
+        throw new Error(`Session store has unsafe permissions (${mode.toString(8)})`);
+      }
     }
   }
 }

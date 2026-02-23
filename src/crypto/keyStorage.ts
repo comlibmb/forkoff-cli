@@ -233,3 +233,14 @@ export function trustPeerKey(deviceId: string, identityPublicKey: string): boole
   }
   return true;
 }
+
+/**
+ * Remove a peer's trusted identity key (used on re-pair to reset TOFU).
+ */
+export function removeTrustedPeerKey(deviceId: string): void {
+  if (trustedPeerKeys.has(deviceId)) {
+    trustedPeerKeys.delete(deviceId);
+    saveTrustedPeerKeys();
+    console.log(`[E2EE] TOFU: Removed trusted key for ${deviceId} (re-pair reset)`);
+  }
+}

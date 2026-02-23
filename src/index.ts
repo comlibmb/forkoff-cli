@@ -11,6 +11,7 @@ import { approvalManager } from './approval';
 import { toolDetector, claudeHooksManager, claudeSessionDetector, claudeProcessManager, PermissionIpcManager } from './tools';
 import { transcriptStreamer } from './transcript-streamer';
 import { setQuiet, setDebug, closeDebugLog, cleanupOldLogs, getLogFilePath, createSpinner } from './logger';
+import { UsageTracker } from './usage-tracker';
 import { enableStartup, disableStartup, isStartupRegistered, getBinaryPath } from './startup';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -573,6 +574,9 @@ async function startConnection(): Promise<void> {
         wsClient.sendToolStatusUpdate('claude_code', 'active');
         wsClient.sendTerminalCwd({ terminalSessionId: data.terminalSessionId, cwd: result.cwd });
 
+        // Track session start for analytics
+        usageTracker.recordSessionStart();
+
         // Notify mobile that the session is ready for input
         wsClient.sendClaudeSessionEvent({
           sessionKey: data.terminalSessionId,
@@ -1000,13 +1004,24 @@ async function startConnection(): Promise<void> {
       });
     });
 
-    // Forward token usage to mobile
+    // Persistent usage tracker
+    const usageTracker = new UsageTracker();
+    wsClient.setUsageTracker(usageTracker);
+
+    // Forward token usage to mobile and persist locally
     claudeProcessManager.on('token_usage', (data: any) => {
       console.log(chalk.blue(`[Claude] Tokens: ${data.usage.inputTokens} in / ${data.usage.outputTokens} out`));
+      usageTracker.recordUsage(data.usage.inputTokens || 0, data.usage.outputTokens || 0);
       wsClient.sendTokenUsage({
         sessionKey: data.sessionKey,
         usage: data.usage,
       });
+    });
+
+    // Handle usage stats request from mobile (pull-refresh)
+    wsClient.on('usage_stats_request', () => {
+      console.log(chalk.blue('[Analytics] Usage stats requested by mobile'));
+      wsClient.sendAllUsageStats();
     });
 
     // When a fresh session captures a real session_id, update the transcript
@@ -1065,6 +1080,8 @@ async function startConnection(): Promise<void> {
     // Keep the process running
     process.on('SIGINT', () => {
       console.log(chalk.yellow('\nDisconnecting...'));
+      claudeProcessManager.cleanupAllPermissionState();
+      usageTracker.flush();
       claudeSessionDetector.stopWatching();
       transcriptStreamer.cleanup();
       wsClient.disconnect();

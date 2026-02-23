@@ -16,6 +16,7 @@ import { execSync, spawn } from 'child_process';
 export interface ClaudeSessionInfo {
   sessionKey: string;
   directory: string;
+  name?: string;
   state: 'active' | 'inactive';
   lastUsedAt: string;
   transcriptPath?: string;
@@ -150,23 +151,47 @@ class ClaudeSessionDetector extends EventEmitter {
       // in directory names (e.g. Dev-SharbelAS should NOT become Dev\SharbelAS)
       let directory = this.decodeProjectDir(projectDir);
 
-      // Try to read the first line to get session ID
+      // Read transcript lines to get session ID and name
       const content = fs.readFileSync(filePath, 'utf8');
-      const firstLine = content.split('\n')[0];
+      const lines = content.split('\n');
       let sessionId = fileName;
+      let name: string | undefined;
 
-      try {
-        const firstMessage = JSON.parse(firstLine);
-        if (firstMessage.sessionId) {
-          sessionId = firstMessage.sessionId;
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const entry = JSON.parse(line);
+          // Extract session ID from first entry
+          if (entry.sessionId && sessionId === fileName) {
+            sessionId = entry.sessionId;
+          }
+          // Extract name from first human/user message
+          if (!name && entry.type === 'human' || !name && entry.role === 'user') {
+            const text = typeof entry.message === 'string'
+              ? entry.message
+              : typeof entry.content === 'string'
+                ? entry.content
+                : Array.isArray(entry.message?.content)
+                  ? entry.message.content.find((b: any) => b.type === 'text')?.text
+                  : typeof entry.message?.content === 'string'
+                    ? entry.message.content
+                    : null;
+            if (text) {
+              // Truncate to 120 chars for display
+              name = text.length > 120 ? text.substring(0, 120) + '...' : text;
+            }
+          }
+          // Stop after finding both
+          if (sessionId !== fileName && name) break;
+        } catch {
+          continue;
         }
-      } catch {
-        // Use filename as session ID
       }
 
       return {
         sessionKey: sessionId,
         directory,
+        name,
         state: 'inactive', // Will be updated if Claude is running
         lastUsedAt: stat.mtime.toISOString(),
         transcriptPath: filePath,
