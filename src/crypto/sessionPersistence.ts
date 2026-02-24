@@ -72,11 +72,13 @@ export function persistSessionKey(
     ensureSessionStoreExists();
 
     const plainData = JSON.stringify({
-      sharedKey: Array.from(sessionKeys.sharedKey),
+      sendKey: Array.from(sessionKeys.sendKey),
+      receiveKey: Array.from(sessionKeys.receiveKey),
       sessionId: sessionKeys.sessionId,
       deviceId: sessionKeys.deviceId,
       messageCounter: sessionKeys.messageCounter,
       lastReceivedCounter: sessionKeys.lastReceivedCounter,
+      createdAt: sessionKeys.createdAt ?? Date.now(),
       timestamp: new Date().toISOString(),
     });
 
@@ -160,12 +162,31 @@ export function loadPersistedSessionKey(
       return null;
     }
 
+    // Support both new (sendKey/receiveKey) and legacy (sharedKey) formats
+    let sendKey: Uint8Array;
+    let receiveKey: Uint8Array;
+    if (data.sendKey && data.receiveKey) {
+      sendKey = new Uint8Array(data.sendKey);
+      receiveKey = new Uint8Array(data.receiveKey);
+    } else if (data.sharedKey) {
+      // Legacy format: same key for both directions (pre-HKDF)
+      const legacyKey = new Uint8Array(data.sharedKey);
+      sendKey = legacyKey;
+      receiveKey = legacyKey;
+    } else {
+      console.error('[Security] Persisted session has no valid key data');
+      fs.unlinkSync(filePath);
+      return null;
+    }
+
     return {
-      sharedKey: new Uint8Array(data.sharedKey),
+      sendKey,
+      receiveKey,
       sessionId: data.sessionId,
       deviceId: data.deviceId || targetDeviceId,
       messageCounter: data.messageCounter || 0,
       lastReceivedCounter: data.lastReceivedCounter || -1,
+      createdAt: data.createdAt,
     };
   } catch (error) {
     console.error('Failed to load persisted session key:', (error as Error).message);

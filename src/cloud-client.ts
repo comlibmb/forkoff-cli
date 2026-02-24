@@ -15,9 +15,10 @@ const MOBILE_EVENTS = [
   'transcript_unsubscribe', 'approval_response', 'claude_approval_response',
   'permission_response', 'permission_rules_sync', 'claude_abort', 'tab_complete',
   'subscribe_device', 'unsubscribe_device',
-  'encrypted_key_exchange_init', 'encrypted_key_exchange_ack', 'encrypted_message',
   'sdk_session_history', 'usage_stats_request', 'session_settings_update',
   'transcript_subscribe_sdk',
+  // E2EE key exchange and encrypted messages from mobile
+  'encrypted_key_exchange_init', 'encrypted_key_exchange_ack', 'encrypted_message',
 ];
 
 export interface CloudRelayOptions {

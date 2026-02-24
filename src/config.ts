@@ -57,6 +57,9 @@ interface DeviceConfig {
   machineId?: string;
   startupEnabled: boolean | null;
   startupBinaryPath: string | null;
+  relayMode: 'cloud' | 'local';
+  relayToken: string | null;
+  pairId: string | null;
 }
 
 const defaultConfig: DeviceConfig = {
@@ -70,6 +73,9 @@ const defaultConfig: DeviceConfig = {
   userId: null,
   startupEnabled: true,
   startupBinaryPath: null,
+  relayMode: 'cloud',
+  relayToken: null,
+  pairId: null,
 };
 
 class Config {
@@ -225,6 +231,33 @@ class Config {
 
   set relayPort(value: number) {
     this.data.relayPort = value;
+    this.save();
+  }
+
+  get relayMode(): 'cloud' | 'local' {
+    return this.data.relayMode;
+  }
+
+  set relayMode(value: 'cloud' | 'local') {
+    this.data.relayMode = value;
+    this.save();
+  }
+
+  get relayToken(): string | null {
+    return this.data.relayToken;
+  }
+
+  set relayToken(value: string | null) {
+    this.data.relayToken = value;
+    this.save();
+  }
+
+  get pairId(): string | null {
+    return this.data.pairId;
+  }
+
+  set pairId(value: string | null) {
+    this.data.pairId = value;
     this.save();
   }
 

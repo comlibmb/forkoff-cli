@@ -92,17 +92,19 @@ describe('CLI Key Storage', () => {
   });
 
   describe('Session Key Storage (In-Memory)', () => {
-    it('stores session keys in memory with NaCl SessionKeys shape', () => {
+    it('stores session keys in memory with directional sendKey/receiveKey', () => {
       const deviceId = 'device-456';
-      const sharedKey = new Uint8Array(32).fill(1);
+      const sendKey = new Uint8Array(32).fill(1);
+      const receiveKey = new Uint8Array(32).fill(2);
       const sessionId = 'session-abc';
 
-      storeSessionKey(deviceId, sharedKey, sessionId);
+      storeSessionKey(deviceId, sendKey, receiveKey, sessionId);
 
       const retrieved = getSessionKey(deviceId);
 
       expect(retrieved).toEqual({
-        sharedKey,
+        sendKey,
+        receiveKey,
         sessionId,
         deviceId,
         messageCounter: 0,
@@ -112,14 +114,16 @@ describe('CLI Key Storage', () => {
 
     it('retrieves session keys by device ID', () => {
       const deviceId = 'device-456';
-      const sharedKey = new Uint8Array(32).fill(2);
+      const sendKey = new Uint8Array(32).fill(3);
+      const receiveKey = new Uint8Array(32).fill(4);
       const sessionId = 'session-xyz';
 
-      storeSessionKey(deviceId, sharedKey, sessionId);
+      storeSessionKey(deviceId, sendKey, receiveKey, sessionId);
 
       const retrieved = getSessionKey(deviceId);
 
-      expect(retrieved?.sharedKey).toEqual(sharedKey);
+      expect(retrieved?.sendKey).toEqual(sendKey);
+      expect(retrieved?.receiveKey).toEqual(receiveKey);
       expect(retrieved?.sessionId).toBe(sessionId);
       expect(retrieved?.deviceId).toBe(deviceId);
       expect(retrieved?.messageCounter).toBe(0);
@@ -136,8 +140,8 @@ describe('CLI Key Storage', () => {
       const device1 = 'device-1';
       const device2 = 'device-2';
 
-      storeSessionKey(device1, new Uint8Array(32).fill(1), 'session-1');
-      storeSessionKey(device2, new Uint8Array(32).fill(2), 'session-2');
+      storeSessionKey(device1, new Uint8Array(32).fill(1), new Uint8Array(32).fill(2), 'session-1');
+      storeSessionKey(device2, new Uint8Array(32).fill(3), new Uint8Array(32).fill(4), 'session-2');
 
       clearSessionKeys();
 
@@ -147,15 +151,18 @@ describe('CLI Key Storage', () => {
 
     it('overwrites existing session key for same device', () => {
       const deviceId = 'device-123';
-      const firstKey = new Uint8Array(32).fill(1);
-      const secondKey = new Uint8Array(32).fill(2);
+      const firstSendKey = new Uint8Array(32).fill(1);
+      const firstRecvKey = new Uint8Array(32).fill(2);
+      const secondSendKey = new Uint8Array(32).fill(3);
+      const secondRecvKey = new Uint8Array(32).fill(4);
 
-      storeSessionKey(deviceId, firstKey, 'session-1');
-      storeSessionKey(deviceId, secondKey, 'session-2');
+      storeSessionKey(deviceId, firstSendKey, firstRecvKey, 'session-1');
+      storeSessionKey(deviceId, secondSendKey, secondRecvKey, 'session-2');
 
       const retrieved = getSessionKey(deviceId);
 
-      expect(retrieved?.sharedKey).toEqual(secondKey);
+      expect(retrieved?.sendKey).toEqual(secondSendKey);
+      expect(retrieved?.receiveKey).toEqual(secondRecvKey);
       expect(retrieved?.sessionId).toBe('session-2');
     });
   });

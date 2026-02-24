@@ -113,18 +113,20 @@ forkoff startup --status    # Check registration
 
 ## Security
 
-All communication between the CLI and mobile app is end-to-end encrypted. The relay server never sees plaintext session data.
+ForkOff uses end-to-end encryption (X25519 ECDH + XSalsa20-Poly1305) so the relay server never sees your code, prompts, or approvals &mdash; only opaque encrypted blobs routed between device UUIDs.
 
 | Layer | Implementation |
 |-------|---------------|
-| **Key exchange** | X25519 ECDH with Ed25519 identity signatures |
-| **Encryption** | XSalsa20-Poly1305 authenticated encryption (NaCl) |
+| **Key exchange** | X25519 ECDH with HKDF-SHA256 directional key derivation |
+| **Authentication** | Ed25519 identity signatures on ephemeral keys (MITM protection) |
+| **Encryption** | XSalsa20-Poly1305 authenticated encryption (NaCl secretbox) |
 | **Identity** | TOFU (Trust On First Use) with key pinning |
 | **Replay protection** | Per-peer monotonic message counters |
+| **Session expiry** | Automatic re-key every 24 hours or 10,000 messages |
 | **Key storage** | OS keychain (macOS Keychain, Windows Credential Manager, Linux libsecret) |
-| **Enforcement** | Sensitive events (session content, approvals, files) never sent in plaintext |
+| **Enforcement** | 24 sensitive event types encrypted; plaintext fallback only when E2EE unavailable |
 
-No additional setup required &mdash; E2EE is enabled automatically when you pair.
+No additional setup required &mdash; E2EE is enabled automatically when you pair. See [SECURITY.md](https://github.com/Forkoff-app/forkoff-cli/blob/main/docs/SECURITY.md) for the full whitepaper.
 
 ---
 

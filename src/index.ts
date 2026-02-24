@@ -82,9 +82,15 @@ program
 
     if (options.show || (!options.port && !options.name && !options.reset)) {
       const localIp = getLocalIp();
+      const isCloud = config.relayMode === 'cloud';
       console.log(chalk.bold('\nCurrent Configuration:'));
-      console.log(`  Relay URL:   ${chalk.cyan(`ws://${localIp}:${config.relayPort}`)}`);
-      console.log(`  Relay Port:  ${chalk.cyan(String(config.relayPort))}`);
+      console.log(`  Relay Mode:  ${isCloud ? chalk.green('Cloud') : chalk.cyan('Local')}`);
+      if (isCloud) {
+        console.log(`  Relay URL:   ${chalk.cyan(config.wsUrl)}`);
+      } else {
+        console.log(`  Relay URL:   ${chalk.cyan(`ws://${localIp}:${config.relayPort}`)}`);
+      }
+      console.log(`  Relay Port:  ${chalk.cyan(String(config.relayPort))} ${isCloud ? chalk.dim('(local mode only)') : ''}`);
       console.log(`  Device Name: ${chalk.cyan(config.deviceName)}`);
       console.log(`  Device ID:   ${chalk.cyan(config.deviceId || 'Not registered')}`);
       console.log(`  Paired:      ${config.isPaired ? chalk.green('Yes') : chalk.yellow('No')}`);
@@ -100,40 +106,66 @@ program
 program
   .command('pair')
   .description('Generate pairing code to connect with mobile app')
-  .action(async () => {
-    const spinner = createSpinner('Starting relay server...').start();
+  .option('--local', 'Use local network relay instead of cloud relay')
+  .action(async (options) => {
+    const isLocal = options.local;
+    const spinner = createSpinner(isLocal ? 'Starting local relay server...' : 'Connecting to cloud relay...').start();
 
     try {
       // Ensure we have a deviceId
       config.ensureDeviceId();
 
-      // Start embedded relay server
-      await wsClient.startServer(config.relayPort);
-
       // Generate random 8-char pairing code
       const pairingCode = crypto.randomBytes(4).toString('hex').toUpperCase().slice(0, 8);
       config.pairingCode = pairingCode;
 
-      // Set pairing code on server for in-process validation
-      wsClient.setPairingCode(pairingCode);
+      if (isLocal) {
+        // Local mode: start embedded relay server (existing behavior)
+        config.relayMode = 'local';
+        await wsClient.startServer(config.relayPort);
 
-      const localIp = getLocalIp();
-      const relayUrl = `ws://${localIp}:${config.relayPort}`;
+        // Set pairing code on server for in-process validation
+        wsClient.setPairingCode(pairingCode);
 
-      spinner.succeed(`Relay server started on ${relayUrl}\n`);
+        const localIp = getLocalIp();
+        const relayUrl = `ws://${localIp}:${config.relayPort}`;
 
-      // Display pairing info
-      console.log(chalk.bold('Scan this QR code with the ForkOff mobile app:\n'));
+        spinner.succeed(`Local relay server started on ${relayUrl}\n`);
 
-      const pairingUrl = `forkoff://pair/${pairingCode}?relay=${encodeURIComponent(relayUrl)}`;
-      qrcode.generate(pairingUrl, { small: true }, (code) => {
-        console.log(code);
-      });
+        // QR includes relay URL for local mode
+        const pairingUrl = `forkoff://pair/${pairingCode}?relay=${encodeURIComponent(relayUrl)}`;
+        console.log(chalk.bold('Scan this QR code with the ForkOff mobile app:\n'));
+        qrcode.generate(pairingUrl, { small: true }, (code) => {
+          console.log(code);
+        });
 
-      console.log(chalk.bold('\nOr enter this code manually:\n'));
-      console.log(chalk.bgBlue.white.bold(`  ${pairingCode}  `));
-      console.log();
-      console.log(chalk.dim(`Relay: ${relayUrl}`));
+        console.log(chalk.bold('\nOr enter this code manually:\n'));
+        console.log(chalk.bgBlue.white.bold(`  ${pairingCode}  `));
+        console.log();
+        console.log(chalk.dim(`Relay: ${relayUrl}`));
+      } else {
+        // Cloud mode (default): connect to cloud relay as a client
+        config.relayMode = 'cloud';
+        await wsClient.connectToRelay(config.wsUrl);
+
+        // Register pairing code with the relay
+        wsClient.setPairingCode(pairingCode);
+
+        spinner.succeed(`Connected to cloud relay\n`);
+
+        // QR without relay URL — mobile uses its default cloud connection
+        const pairingUrl = `forkoff://pair/${pairingCode}`;
+        console.log(chalk.bold('Scan this QR code with the ForkOff mobile app:\n'));
+        qrcode.generate(pairingUrl, { small: true }, (code) => {
+          console.log(code);
+        });
+
+        console.log(chalk.bold('\nOr enter this code manually:\n'));
+        console.log(chalk.bgBlue.white.bold(`  ${pairingCode}  `));
+        console.log();
+        console.log(chalk.dim(`Cloud relay: ${config.wsUrl}`));
+      }
+
       console.log();
 
       // Wait for pairing
@@ -142,7 +174,6 @@ program
 
       const pairData = await waitForPairing();
 
-      // Server already sent pair_device_ack to mobile
       config.pairedAt = new Date().toISOString();
 
       console.log(chalk.green('\n\u2713 Device paired successfully!'));
@@ -158,7 +189,7 @@ program
         }
       }
 
-      // Continue to main connection (server already running)
+      // Continue to main connection (transport already running)
       await startConnection();
     } catch (error: any) {
       spinner.fail('Failed to pair device');
@@ -177,11 +208,17 @@ program
     }
 
     const localIp = getLocalIp();
+    const isCloud = config.relayMode === 'cloud';
     console.log(chalk.bold('\nDevice Status:'));
     console.log(`  Device ID:   ${chalk.cyan(config.deviceId)}`);
     console.log(`  Device Name: ${chalk.cyan(config.deviceName)}`);
     console.log(`  Paired:      ${config.isPaired ? chalk.green('Yes') : chalk.yellow('No')}`);
-    console.log(`  Relay URL:   ${chalk.cyan(`ws://${localIp}:${config.relayPort}`)}`);
+    console.log(`  Relay Mode:  ${isCloud ? chalk.green('Cloud') : chalk.cyan('Local')}`);
+    if (isCloud) {
+      console.log(`  Relay URL:   ${chalk.cyan(config.wsUrl)}`);
+    } else {
+      console.log(`  Relay URL:   ${chalk.cyan(`ws://${localIp}:${config.relayPort}`)}`);
+    }
     console.log(`  Mobile:      ${wsClient.isConnected ? chalk.green('Connected') : chalk.yellow('Not connected')}`);
     if (config.pairedAt) {
       console.log(`  Paired At:   ${chalk.dim(config.pairedAt)}`);
@@ -192,7 +229,8 @@ program
 program
   .command('connect')
   .description('Reconnect to ForkOff (for previously paired devices)')
-  .action(async () => {
+  .option('--local', 'Use local network relay instead of cloud relay')
+  .action(async (options) => {
     if (!config.deviceId) {
       console.log(chalk.yellow('Device not registered. Run "forkoff pair" first.'));
       return;
@@ -213,11 +251,20 @@ program
       }
     }
 
-    // Start embedded relay server before entering connection flow
-    const localIp = getLocalIp();
-    const relayUrl = `ws://${localIp}:${config.relayPort}`;
-    await wsClient.startServer(config.relayPort);
-    console.log(chalk.cyan(`Relay server started on ${relayUrl}`));
+    // Determine relay mode: explicit flag > saved config
+    const useLocal = options.local || config.relayMode === 'local';
+
+    if (useLocal) {
+      // Local mode: start embedded relay server
+      const localIp = getLocalIp();
+      const relayUrl = `ws://${localIp}:${config.relayPort}`;
+      await wsClient.startServer(config.relayPort);
+      console.log(chalk.cyan(`Local relay server started on ${relayUrl}`));
+    } else {
+      // Cloud mode (default): connect to cloud relay
+      await wsClient.connectToRelay(config.wsUrl);
+      console.log(chalk.cyan(`Connected to cloud relay (${config.wsUrl})`));
+    }
     console.log(chalk.dim('Waiting for mobile app to connect...\n'));
 
     await startConnection();
@@ -237,6 +284,8 @@ program
 
     config.pairedAt = null;
     config.pairingCode = null;
+    config.relayToken = null;
+    config.pairId = null;
 
     console.log(chalk.green('Device disconnected and unpaired.'));
     console.log(chalk.dim('Run "forkoff pair" to pair again.'));
@@ -774,6 +823,10 @@ async function startConnection(): Promise<void> {
     // Handle transcript fetch requests from mobile
     wsClient.on('transcript_fetch', async (data: any) => {
       console.log(chalk.dim(`[Transcript] Fetching: offset: ${data.offset}, limit: ${data.limit}`));
+
+      // Signal loading state to mobile
+      wsClient.sendSessionLoading({ sessionKey: data.sessionKey, state: 'loading' });
+
       try {
         // SECURITY: Validate transcript path is under ~/.claude/projects/ to prevent path traversal
         const resolvedTranscriptPath = path.resolve(data.transcriptPath);
@@ -781,6 +834,7 @@ async function startConnection(): Promise<void> {
         const relPath = path.relative(claudeProjectsDir, resolvedTranscriptPath);
         if (relPath.startsWith('..') || path.isAbsolute(relPath)) {
           console.warn(chalk.yellow(`[Transcript] Access denied — path outside ~/.claude/projects/`));
+          wsClient.sendSessionLoading({ sessionKey: data.sessionKey, state: 'error', error: 'Access denied' });
           return;
         }
 
@@ -798,8 +852,12 @@ async function startConnection(): Promise<void> {
           offset: data.offset || 0,
           requestedBy: data.requestedBy,
         });
+
+        // Signal ready state to mobile
+        wsClient.sendSessionLoading({ sessionKey: data.sessionKey, state: 'ready' });
       } catch (error: any) {
         console.error(chalk.red(`[Transcript] Error: ${error.message}`));
+        wsClient.sendSessionLoading({ sessionKey: data.sessionKey, state: 'error', error: error.message });
       }
     });
 
@@ -821,6 +879,17 @@ async function startConnection(): Promise<void> {
     wsClient.on('transcript_unsubscribe', (data: any) => {
       console.log(chalk.dim(`[Transcript] Unsubscribing from session`));
       transcriptStreamer.unsubscribeFromUpdates(data.sessionKey);
+    });
+
+    // Re-send all sessions when E2EE establishes (bypasses queue TTL expiry)
+    wsClient.on('e2ee_established', () => {
+      if (claudeSessionDetector.isClaudeInstalled()) {
+        const sessions = claudeSessionDetector.scanSessions();
+        if (sessions.length > 0) {
+          console.log(chalk.cyan(`[Claude] E2EE established — re-sending ${sessions.length} session(s)`));
+          wsClient.sendClaudeSessions(sessions);
+        }
+      }
     });
 
     // Handle claude sessions request - mobile app wants current sessions
@@ -847,6 +916,65 @@ async function startConnection(): Promise<void> {
 
         // Send tool status
         wsClient.sendToolStatusUpdate('claude_code', hasActiveSession ? 'active' : 'inactive');
+      }
+    });
+
+    // Handle SDK session history requests from mobile (local JSONL lookup)
+    // Mobile sends this when opening a session — CLI resolves it locally from disk
+    wsClient.on('sdk_session_history', async (data: any) => {
+      console.log(chalk.dim(`[Transcript] SDK session history requested`));
+
+      // Signal loading state to mobile
+      wsClient.sendSessionLoading({ sessionKey: data.sessionKey, state: 'loading' });
+
+      try {
+        // Find session locally by sessionKey or claudeSessionId
+        let sessions = claudeSessionDetector.getSessions();
+        let session = sessions.find((s: any) => s.sessionKey === data.sessionKey);
+        if (!session && data.claudeSessionId) {
+          session = sessions.find((s: any) => s.sessionKey === data.claudeSessionId);
+        }
+
+        // Fallback: rescan if not cached
+        if (!session) {
+          const freshSessions = claudeSessionDetector.scanSessions();
+          session = freshSessions.find((s: any) =>
+            s.sessionKey === data.sessionKey ||
+            (data.claudeSessionId && s.sessionKey === data.claudeSessionId)
+          );
+        }
+
+        if (session?.transcriptPath) {
+          const result = await transcriptStreamer.fetchHistory(
+            session.transcriptPath,
+            data.offset || 0,
+            data.limit || 200,
+            true
+          );
+          console.log(chalk.dim(`[Transcript] Sending history: ${result.entries.length} entries`));
+          wsClient.sendTranscriptHistory({
+            sessionKey: data.sessionKey,
+            ...result,
+            offset: data.offset || 0,
+            requestedBy: data.requestedBy,
+          });
+        } else {
+          // No local transcript — send empty response so mobile stops loading
+          wsClient.sendTranscriptHistory({
+            sessionKey: data.sessionKey,
+            entries: [],
+            totalEntries: 0,
+            offset: 0,
+            hasMore: false,
+            requestedBy: data.requestedBy,
+          });
+        }
+
+        // Signal ready state
+        wsClient.sendSessionLoading({ sessionKey: data.sessionKey, state: 'ready' });
+      } catch (error: any) {
+        console.error(chalk.red(`[Transcript] SDK session history error: ${error.message}`));
+        wsClient.sendSessionLoading({ sessionKey: data.sessionKey, state: 'error', error: error.message });
       }
     });
 

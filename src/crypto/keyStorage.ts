@@ -77,20 +77,23 @@ export async function deletePrivateKey(deviceId: string): Promise<void> {
 }
 
 /**
- * Stores session key in memory
+ * Stores session keys in memory
  * Session keys are ephemeral and not persisted to disk
  *
  * @param deviceId - Target device ID
- * @param sharedKey - NaCl secretbox shared key (32 bytes)
+ * @param sendKey - 32-byte directional key for encrypting outgoing messages
+ * @param receiveKey - 32-byte directional key for decrypting incoming messages
  * @param sessionId - Unique session identifier
  */
 export function storeSessionKey(
   deviceId: string,
-  sharedKey: Uint8Array,
+  sendKey: Uint8Array,
+  receiveKey: Uint8Array,
   sessionId: string
 ): void {
   sessionKeyStore.set(deviceId, {
-    sharedKey,
+    sendKey,
+    receiveKey,
     sessionId,
     deviceId,
     messageCounter: 0,

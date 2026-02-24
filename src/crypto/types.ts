@@ -29,11 +29,13 @@ export interface EncryptedMessage {
 
 /** Derived session keys for a specific device-to-device connection */
 export interface SessionKeys {
-  sharedKey: Uint8Array;  // 32-byte shared secret for NaCl secretbox
+  sendKey: Uint8Array;    // 32-byte directional key for encrypting outgoing messages
+  receiveKey: Uint8Array; // 32-byte directional key for decrypting incoming messages
   sessionId: string;
   deviceId: string;       // The remote device ID
   messageCounter: number; // Outgoing message counter
   lastReceivedCounter: number; // Last received counter (replay protection)
+  createdAt?: number;     // Timestamp when session was established (for expiry)
 }
 
 /** Ed25519 signing key pair for identity verification during key exchange */
