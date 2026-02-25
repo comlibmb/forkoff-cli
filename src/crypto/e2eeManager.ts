@@ -277,10 +277,7 @@ export class E2EEManager {
     // Derive directional send/receive keys via HKDF
     const { sendKey, receiveKey } = deriveSessionKeys(rawSharedKey, this.deviceId, init.senderDeviceId);
 
-    // Log key fingerprint for debugging key mismatch
-    const sendKeyFP = encodeBase64(sendKey).substring(0, 12);
-    const recvKeyFP = encodeBase64(receiveKey).substring(0, 12);
-    console.log(`[E2EE] Init: sendKey=${sendKeyFP}, recvKey=${recvKeyFP}, peer=${init.senderDeviceId}, myEphPub=${ephemeral.publicKey.substring(0, 12)}, peerEphPub=${init.ephemeralPublicKey.substring(0, 12)}`);
+    console.log(`[E2EE] Key exchange init processed — session established with peer ${init.senderDeviceId.substring(0, 8)}...`);
 
     // Store session
     const sessionId = `session-${init.senderDeviceId}-${this.deviceId}-${Date.now()}`;
@@ -332,7 +329,7 @@ export class E2EEManager {
     // If there's exactly one pending exchange, use it regardless of key.
     if (!pendingEntry && this.pendingExchanges.size === 1) {
       const [fallbackKey, fallbackEntry] = this.pendingExchanges.entries().next().value!;
-      console.log(`[E2EE] Pending exchange not found for ${peerId}, falling back to ${fallbackKey}`);
+      console.log(`[E2EE] Pending exchange not found for ${peerId.substring(0, 8)}..., using fallback`);
       pendingEntry = fallbackEntry;
       pendingKey = fallbackKey;
     }
@@ -356,10 +353,7 @@ export class E2EEManager {
     // Derive directional send/receive keys via HKDF
     const { sendKey, receiveKey } = deriveSessionKeys(rawSharedKey, this.deviceId, peerId);
 
-    // Log key fingerprint for debugging key mismatch
-    const sendKeyFP = encodeBase64(sendKey).substring(0, 12);
-    const recvKeyFP = encodeBase64(receiveKey).substring(0, 12);
-    console.log(`[E2EE] Ack: sendKey=${sendKeyFP}, recvKey=${recvKeyFP}, peer=${peerId}, myEphPub=${pending.publicKey.substring(0, 12)}, peerEphPub=${ack.ephemeralPublicKey.substring(0, 12)}`);
+    console.log(`[E2EE] Key exchange ack processed — session established with peer ${peerId.substring(0, 8)}...`);
 
     // Store session
     const sessionId = `session-${this.deviceId}-${peerId}-${Date.now()}`;
@@ -451,10 +445,8 @@ export class E2EEManager {
     const payload = encrypt(plaintext, session.sendKey);
     session.outgoingCounter++;
 
-    // Log encryption key fingerprint (first message only to avoid spam)
     if (session.outgoingCounter === 1) {
-      const keyFP = encodeBase64(session.sendKey).substring(0, 12);
-      console.log(`[E2EE] Encrypting first message with sendKey fingerprint=${keyFP}, recipient=${recipientDeviceId}`);
+      console.log(`[E2EE] First encrypted message sent to ${recipientDeviceId.substring(0, 8)}...`);
     }
 
     return {
@@ -495,7 +487,7 @@ export class E2EEManager {
 
     // Check expiry AFTER decrypting — valid messages still get through, but warn caller
     if (this.isSessionExpired(senderDeviceId)) {
-      console.warn(`[E2EE] Session with ${senderDeviceId} has expired after decryption — re-key required`);
+      console.warn(`[E2EE] Session with ${senderDeviceId.substring(0, 8)}... has expired — re-key required`);
     }
 
     return plaintext;

@@ -85,7 +85,8 @@ export class EmbeddedRelayServer extends EventEmitter {
       });
 
       this.io.on('connection', (socket) => {
-        console.log(`[Server] Mobile connected: ${socket.data.deviceId}`);
+        const devId = socket.data.deviceId || 'unknown';
+        console.log(`[Server] Mobile connected: ${devId.length > 8 ? devId.substring(0, 8) + '...' : devId}`);
 
         // Track the mobile socket (only one active connection)
         if (this.mobileSocket) {

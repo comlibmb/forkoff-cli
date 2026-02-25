@@ -141,7 +141,8 @@ export class CloudRelayClient extends EventEmitter {
 
       // Handle mobile connected notification from relay
       this.socket.on('mobile_connected', (data: any) => {
-        console.log(`[CloudRelay] Mobile connected: ${data.deviceId || 'unknown'}`);
+        const id = data.deviceId || 'unknown';
+        console.log(`[CloudRelay] Mobile connected: ${id.length > 8 ? id.substring(0, 8) + '...' : id}`);
         this.emit('mobile_connected', { deviceId: data.deviceId || data.mobileDeviceId });
       });
 

@@ -302,7 +302,7 @@ export class WebSocketClient extends EventEmitter {
 
     // When mobile connects, emit connected + start heartbeat + initiate E2EE
     this.server.on('mobile_connected', (data) => {
-      console.log(`[WS] Mobile connected: ${data.deviceId}`);
+      console.log(`[WS] Mobile connected: ${data.deviceId?.substring(0, 8)}...`);
       this.emit('connected');
       this.startHeartbeat();
 
@@ -312,7 +312,7 @@ export class WebSocketClient extends EventEmitter {
       // that mobile can't decrypt, causing "No session established" errors.
       // A fresh key exchange will re-establish the session after debounce.
       if (this.e2eePeerDeviceId) {
-        console.log(`[E2EE] Clearing stale peer state for ${this.e2eePeerDeviceId} (mobile reconnected)`);
+        console.log(`[E2EE] Clearing stale peer state (mobile reconnected)`);
         this.e2eeManager?.clearSession(this.e2eePeerDeviceId);
         this.e2eePeerDeviceId = null;
       }
@@ -334,7 +334,7 @@ export class WebSocketClient extends EventEmitter {
 
         try {
           this._keyExchangePending = true;
-          console.log(`[E2EE] Initiating key exchange with ${targetId} (after debounce)`);
+          console.log(`[E2EE] Initiating key exchange with ${targetId.substring(0, 8)}...`);
           this.e2eeManager.clearSession(targetId);
           const initPayload = this.e2eeManager.createKeyExchangeInit(targetId);
           this.server?.emitToMobile('encrypted_key_exchange_init', {
@@ -397,7 +397,7 @@ export class WebSocketClient extends EventEmitter {
         return;
       }
       try {
-        console.log(`[E2EE] Received key exchange init from ${data.senderDeviceId}`);
+        console.log(`[E2EE] Received key exchange init from ${data.senderDeviceId.substring(0, 8)}...`);
         const ack = this.e2eeManager.handleKeyExchangeInit(data);
         this.e2eePeerDeviceId = data.senderDeviceId;
         this.server?.emitToMobile('encrypted_key_exchange_ack', {
@@ -417,11 +417,11 @@ export class WebSocketClient extends EventEmitter {
     this.server.on('encrypted_key_exchange_ack', (data: KeyExchangeAck) => {
       if (!this.e2eeManager) return;
       try {
-        console.log(`[E2EE] Received key exchange ack from ${data.senderDeviceId}`);
+        console.log(`[E2EE] Received key exchange ack from ${data.senderDeviceId.substring(0, 8)}...`);
         this.e2eeManager.handleKeyExchangeAck(data);
         this._keyExchangePending = false;
         this.e2eePeerDeviceId = data.senderDeviceId;
-        console.log(`[E2EE] Key exchange complete — session established with ${data.senderDeviceId}`);
+        console.log(`[E2EE] Key exchange complete — session established`);
         this.emit('e2ee_established', { peerDeviceId: data.senderDeviceId });
         this.flushSensitiveQueue();
         this.sendAllUsageStats();
@@ -429,7 +429,7 @@ export class WebSocketClient extends EventEmitter {
         const msg = err instanceof Error ? err.message : String(err);
         // Only suppress if it's truly a duplicate ack (pending exchange already consumed)
         if (msg.includes('No pending key exchange')) {
-          console.log(`[E2EE] Duplicate ack from ${data.senderDeviceId} — ignored`);
+          console.log(`[E2EE] Duplicate ack — ignored`);
         } else {
           console.error(`[E2EE] Key exchange ack failed: ${msg}`);
           this._keyExchangePending = false;
@@ -692,7 +692,7 @@ export class WebSocketClient extends EventEmitter {
     if (sessions.length > 0) {
       const peer = this.e2eePeerDeviceId;
       const hasE2EE = peer ? this.e2eeManager?.hasSessionKey(peer) : false;
-      console.log(`[WS] sendClaudeSessions: ${sessions.length} sessions, peer=${peer || 'none'}, e2ee=${hasE2EE}, queue=${this.pendingSensitiveMessages.length}`);
+      console.log(`[WS] sendClaudeSessions: ${sessions.length} sessions, e2ee=${hasE2EE}`);
       const withDeviceId = sessions.map(s => ({ ...s, deviceId: config.deviceId }));
       this.emitSensitive('claude_session_batch_update', { sessions: withDeviceId }, peer ?? undefined);
     }
