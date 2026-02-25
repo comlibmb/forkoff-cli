@@ -1,6 +1,6 @@
 {
   "name": "forkoff",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "description": "CLI tool to connect Claude Code to the ForkOff mobile app for remote monitoring and approvals",
   "main": "dist/integration.js",
   "types": "dist/integration.d.ts",
