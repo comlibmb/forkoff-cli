@@ -27,9 +27,7 @@
 
 ForkOff CLI connects [Claude Code](https://claude.ai/code) on your laptop to the ForkOff mobile app, giving you real-time monitoring, interactive approvals, and usage analytics from anywhere.
 
-> **Open Source** &mdash; ForkOff CLI is now MIT licensed. Contributions welcome!
->
-> **Open Beta** &mdash; [Join the iOS TestFlight](https://testflight.apple.com/join/dhh5FrN7)
+> **Open Source** &mdash; MIT licensed. Contributions welcome!
 
 ## Installation
 
@@ -66,27 +64,45 @@ Keep this running to stream sessions to your phone in real-time.
 - **Usage analytics** &mdash; Track token usage, session counts, and streaks across devices
 - **Multi-device support** &mdash; Connect multiple CLI instances, analytics aggregate automatically
 - **Auto-start** &mdash; Optionally launch on login so your phone is always connected
-- **Direct P2P connection** &mdash; Embedded relay server, no cloud dependency for session data
+- **Local relay option** &mdash; Run with `--local` for a direct P2P connection without cloud dependency
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `forkoff pair` | Generate QR code to pair with mobile app |
-| `forkoff connect` | Connect and listen for commands |
+| `forkoff pair [--local]` | Generate QR code to pair with mobile app |
+| `forkoff connect [--local]` | Reconnect to ForkOff (for previously paired devices) |
 | `forkoff status` | Check connection status |
 | `forkoff disconnect` | Disconnect and unpair device |
 | `forkoff config` | View/modify configuration |
 | `forkoff startup` | Manage automatic startup on login |
-| `forkoff tools` | Detect AI coding tools on your machine |
-| `forkoff logs` | List debug log files for troubleshooting |
+| `forkoff tools` | Detect AI tools, install/uninstall hooks |
+| `forkoff logs` | List, view, or clean debug logs |
 
 ### Configuration
 
 ```bash
 forkoff config --show            # Show current config
 forkoff config --name "My MBP"   # Set device name
+forkoff config --port 8080       # Set relay server port
 forkoff config --reset           # Reset to defaults
+```
+
+### Tools
+
+```bash
+forkoff tools --detect           # Detect installed AI tools
+forkoff tools --install-hooks    # Install ForkOff hooks for Claude Code
+forkoff tools --uninstall-hooks  # Remove ForkOff hooks
+forkoff tools --watch            # Watch tool status changes
+```
+
+### Logs
+
+```bash
+forkoff logs                     # List debug log files
+forkoff logs --latest            # Print path to most recent log
+forkoff logs --clean             # Delete all log files
 ```
 
 ### Global Options
@@ -126,7 +142,7 @@ ForkOff uses end-to-end encryption (X25519 ECDH + XSalsa20-Poly1305) so the rela
 | **Key storage** | OS keychain (macOS Keychain, Windows Credential Manager, Linux libsecret) |
 | **Enforcement** | 24 sensitive event types encrypted; plaintext fallback only when E2EE unavailable |
 
-No additional setup required &mdash; E2EE is enabled automatically when you pair. See [SECURITY.md](https://github.com/Forkoff-app/forkoff-cli/blob/main/docs/SECURITY.md) for the full whitepaper.
+No additional setup required &mdash; E2EE is enabled automatically when you pair.
 
 ---
 
@@ -158,7 +174,7 @@ forkoff.sendTerminalOutput(sessionId, '> npm install\nDone', 'stdout');
 | Platform | Location |
 |----------|----------|
 | **Windows** | `%APPDATA%\forkoff-cli\config.json` |
-| **macOS** | `~/Library/Preferences/forkoff-cli/config.json` |
+| **macOS** | `~/.config/forkoff-cli/config.json` |
 | **Linux** | `~/.config/forkoff-cli/config.json` |
 
 ## Development
@@ -175,7 +191,7 @@ npm test          # Run tests
 ## Requirements
 
 - Node.js 18+
-- [ForkOff mobile app](https://testflight.apple.com/join/dhh5FrN7) (iOS)
+- [ForkOff mobile app](https://github.com/Forkoff-app/forkoff-react-native) (iOS/Android)
 
 ## License
 

@@ -1,7 +1,7 @@
 {
   "name": "forkoff",
   "version": "1.1.1",
-  "description": "CLI tool to connect your AI coding tools to mobile | Open Beta - Download the app: https://testflight.apple.com/join/dhh5FrN7",
+  "description": "CLI tool to connect Claude Code to the ForkOff mobile app for remote monitoring and approvals",
   "main": "dist/integration.js",
   "types": "dist/integration.d.ts",
   "homepage": "https://forkoff.app",
@@ -39,10 +39,15 @@
     "coding",
     "mobile",
     "claude",
+    "claude-code",
     "forkoff",
-    "beta",
-    "testflight"
+    "remote-control",
+    "developer-tools",
+    "websocket"
   ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "author": {
     "name": "ForkOff",
     "email": "support@forkoff.app",
