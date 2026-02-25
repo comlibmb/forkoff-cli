@@ -1027,6 +1027,55 @@ class ClaudeProcessManager extends EventEmitter {
   }
 
   /**
+   * Release a single session — clean up its hooks and IPC.
+   * Called when mobile navigates away from the session screen after taking over.
+   */
+  releaseSession(sessionKey: string): void {
+    // Find the process by sessionKey or terminalSessionId
+    let terminalSessionId: string | undefined;
+    let directory: string | undefined;
+
+    for (const [id, info] of this.processes) {
+      if (id === sessionKey || info.sessionKey === sessionKey) {
+        terminalSessionId = id;
+        directory = info.directory;
+        break;
+      }
+    }
+
+    // Also check closed sessions in case the process already exited
+    if (!terminalSessionId) {
+      for (const [id, info] of this.closedSessions) {
+        if (id === sessionKey || info.sessionKey === sessionKey) {
+          terminalSessionId = id;
+          directory = info.directory;
+          break;
+        }
+      }
+    }
+
+    if (terminalSessionId) {
+      // Stop permission IPC for this session
+      this.stopPermissionIpc(terminalSessionId);
+
+      // Remove hook from directory if no other active sessions use it
+      if (directory) {
+        const otherSessionsInDir = Array.from(this.processes.values())
+          .filter(p => p.directory === directory && p.terminalSessionId !== terminalSessionId);
+        if (otherSessionsInDir.length === 0) {
+          this.removeHook(directory);
+        }
+      }
+
+      // Clear taken-over state
+      this.takenOverSessions.delete(terminalSessionId);
+      console.log(`[Claude Process] Session released: ${terminalSessionId}`);
+    } else {
+      console.log(`[Claude Process] Session release: no matching session found for ${sessionKey}`);
+    }
+  }
+
+  /**
    * Get all pending permission prompts across all IPC managers.
    * Used to sync pending permissions to mobile on take-over.
    */

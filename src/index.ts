@@ -464,6 +464,7 @@ async function startConnection(): Promise<void> {
 
   try {
     PermissionIpcManager.cleanupStaleTempFiles();
+    claudeProcessManager.cleanupAllPermissionState();
     spinner.succeed('Ready!\n');
 
     // Detect connected tools
@@ -1199,6 +1200,14 @@ async function startConnection(): Promise<void> {
     wsClient.on('disconnected', (reason) => {
       console.log(chalk.yellow(`\nMobile disconnected: ${reason}`));
       console.log(chalk.dim('Waiting for mobile to reconnect...'));
+      claudeProcessManager.autoAllowAllPendingPrompts();
+      claudeProcessManager.cleanupAllPermissionState();
+      claudeProcessManager.clearAllTakenOver();
+    });
+
+    wsClient.on('session_release', (data: any) => {
+      console.log(chalk.dim(`[Session] Mobile released session: ${data.sessionKey}`));
+      claudeProcessManager.releaseSession(data.sessionKey);
     });
 
     wsClient.on('error', (error) => {

@@ -215,7 +215,7 @@ const PLAINTEXT_DROP_EVENTS = [
   'directory_list', 'transcript_fetch', 'transcript_subscribe',
   'read_file', 'claude_approval_response', 'permission_response',
   'permission_rules_sync', 'claude_abort', 'tab_complete',
-  'usage_stats_request', 'sdk_session_history',
+  'usage_stats_request', 'sdk_session_history', 'session_release',
 ];
 
 /** Events forwarded from server that do NOT need plaintext-drop checking */
