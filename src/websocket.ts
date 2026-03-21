@@ -148,6 +148,7 @@ const ALLOWED_ENCRYPTED_EVENTS = new Set([
   'sdk_session_history',
   'claude_abort',
   'usage_stats_request',
+  'session_release',
 ]);
 
 // Events that carry user data and MUST be encrypted — plaintext fallback is refused.
@@ -300,10 +301,11 @@ export class WebSocketClient extends EventEmitter {
   private wireUpTransportEvents(): void {
     if (!this.server) return;
 
-    // When mobile connects, emit connected + start heartbeat + initiate E2EE
+    // When mobile connects, emit connected + send immediate status + start heartbeat + initiate E2EE
     this.server.on('mobile_connected', (data) => {
       console.log(`[WS] Mobile connected: ${data.deviceId?.substring(0, 8)}...`);
       this.emit('connected');
+      this.sendHeartbeat(); // Immediate status update — don't wait for first 30s interval
       this.startHeartbeat();
 
       // SECURITY: Clear stale E2EE peer state on every mobile connect.
@@ -640,9 +642,9 @@ export class WebSocketClient extends EventEmitter {
 
   /** SECURITY: Check if plaintext inbound events should be dropped (E2EE active with peer) */
   private shouldDropPlaintextInbound(): boolean {
-    // In cloud relay mode, events arrive via API forwarding — trusted, don't drop
-    if (this.isCloudRelay) return false;
-    // In embedded relay mode, mobile connects directly — drop plaintext when E2EE active
+    // Drop plaintext events when an E2EE session is established with the peer —
+    // legitimate events should arrive as encrypted_message, not plaintext.
+    // Applies to both cloud relay and local modes.
     return !!(this.e2eePeerDeviceId && this.e2eeManager?.hasSessionKey(this.e2eePeerDeviceId));
   }
 

@@ -1200,7 +1200,7 @@ async function startConnection(): Promise<void> {
     wsClient.on('disconnected', (reason) => {
       console.log(chalk.yellow(`\nMobile disconnected: ${reason}`));
       console.log(chalk.dim('Waiting for mobile to reconnect...'));
-      claudeProcessManager.autoAllowAllPendingPrompts();
+      claudeProcessManager.resolveAllPendingPrompts('deny', 'mobile disconnected');
       claudeProcessManager.cleanupAllPermissionState();
       claudeProcessManager.clearAllTakenOver();
     });
@@ -1242,16 +1242,19 @@ async function startConnection(): Promise<void> {
 // Helper function to wait for pairing via WebSocket event
 async function waitForPairing(): Promise<{ mobileDeviceId: string }> {
   return new Promise((resolve) => {
-    wsClient.on('pair_device', (data: any) => {
+    const sigintHandler = () => {
+      console.log(chalk.yellow('\nPairing cancelled.'));
+      wsClient.disconnect();
+      process.exit(0);
+    };
+
+    wsClient.once('pair_device', (data: any) => {
+      process.removeListener('SIGINT', sigintHandler);
       resolve({ mobileDeviceId: data.mobileDeviceId });
     });
 
     // Handle Ctrl+C
-    process.on('SIGINT', () => {
-      console.log(chalk.yellow('\nPairing cancelled.'));
-      wsClient.disconnect();
-      process.exit(0);
-    });
+    process.on('SIGINT', sigintHandler);
   });
 }
 

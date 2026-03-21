@@ -97,7 +97,7 @@ jest.mock('../tools', () => ({
     handlePermissionResponse: jest.fn(),
     updatePermissionRules: jest.fn(),
     clearAllTakenOver: jest.fn(),
-    autoAllowAllPendingPrompts: jest.fn(),
+    resolveAllPendingPrompts: jest.fn(),
     cleanupAllPermissionState: jest.fn(),
     getAllPendingPrompts: jest.fn().mockReturnValue([]),
     on: jest.fn(),

@@ -462,10 +462,16 @@ class ClaudeProcessManager extends EventEmitter {
     // If there's an existing process, kill it first (Claude SDK only supports 1 turn per process)
     if (info?.process && info.process.exitCode === null) {
       console.log(`[Claude Process] Killing existing process for new message (SDK limitation: 1 turn per process)`);
-      info.process.kill('SIGTERM');
-      // Wait for process to die
-      await new Promise(resolve => setTimeout(resolve, 200));
+      const oldProc = info.process;
       this.processes.delete(terminalSessionId);
+      oldProc.kill('SIGTERM');
+      // Wait for process to exit: SIGTERM first, escalate to SIGKILL after 1.5s
+      await new Promise<void>(resolve => {
+        const escalate = setTimeout(() => { try { oldProc.kill('SIGKILL'); } catch {} }, 1500);
+        const timeout = setTimeout(() => { clearTimeout(escalate); resolve(); }, 3000);
+        oldProc.once('close', () => { clearTimeout(timeout); clearTimeout(escalate); resolve(); });
+        if (oldProc.exitCode !== null) { clearTimeout(timeout); clearTimeout(escalate); resolve(); }
+      });
       info = undefined;
     }
 
@@ -1088,19 +1094,18 @@ class ClaudeProcessManager extends EventEmitter {
   }
 
   /**
-   * Auto-allow all pending permission prompts across all IPC managers.
-   * Called when mobile disconnects so Claude doesn't hang waiting for approval.
+   * Resolve all pending permission prompts with a given decision.
+   * Called when mobile disconnects — defaults to 'deny' since the user can't verify.
    */
-  autoAllowAllPendingPrompts(): void {
+  resolveAllPendingPrompts(decision: 'allow' | 'deny', reason: string): void {
     const pending = this.getAllPendingPrompts();
     for (const prompt of pending) {
-      // Find the IPC manager that owns this prompt and respond
       for (const [, ipcManager] of this.permissionIpcManagers) {
-        ipcManager.handleResponse(prompt.promptId, 'allow', 'Auto-allowed: mobile disconnected');
+        ipcManager.handleResponse(prompt.promptId, decision, reason);
       }
     }
     if (pending.length > 0) {
-      console.log(`[Claude Process] Auto-allowed ${pending.length} pending permission prompt(s) on mobile disconnect`);
+      console.log(`[Claude Process] Auto-${decision === 'allow' ? 'allowed' : 'denied'} ${pending.length} pending permission prompt(s): ${reason}`);
     }
   }
 
