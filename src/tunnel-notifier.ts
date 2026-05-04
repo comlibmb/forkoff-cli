@@ -1,7 +1,12 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = 'https://iqfvfcncnvjbompqjhnh.supabase.co';
-const supabaseAnonKey = 'sb_publishable_PMYuGKey4HCmxWP5vHuUmw_a7TQ_y1B';
+// Supabase credentials loaded from environment variables
+const supabaseUrl = process.env.FORKOFF_SUPABASE_URL || process.env.SUPABASE_URL || '';
+const supabaseAnonKey = process.env.FORKOFF_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  console.warn('[TunnelNotifier] Supabase credentials not configured. Set FORKOFF_SUPABASE_URL and FORKOFF_SUPABASE_ANON_KEY environment variables.');
+}
 
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
