@@ -13,9 +13,14 @@ import { transcriptStreamer } from './transcript-streamer';
 import { setQuiet, setDebug, closeDebugLog, cleanupOldLogs, getLogFilePath, createSpinner } from './logger';
 import { UsageTracker } from './usage-tracker';
 import { enableStartup, disableStartup, isStartupRegistered, getBinaryPath } from './startup';
+import { TunnelManager } from './tunnel';
+import { TunnelNotifier } from './tunnel-notifier';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+
+// Module-level tunnel manager for cleanup on exit
+let activeTunnel: TunnelManager | null = null;
 
 /** Get the local network IP (first non-internal IPv4 address) */
 function getLocalIp(): string {
@@ -56,6 +61,7 @@ program
   .description('Configure ForkOff CLI settings')
   .option('-p, --port <port>', 'Set relay server port')
   .option('-n, --name <name>', 'Set device name')
+  .option('--allowed-dirs <dirs>', 'Set allowed directories (comma-separated, e.g. "D:\\datas,C:\\Projects")')
   .option('--show', 'Show current configuration')
   .option('--reset', 'Reset all configuration')
   .action(async (options) => {
@@ -80,7 +86,14 @@ program
       console.log(chalk.green(`Device name set to: ${options.name}`));
     }
 
-    if (options.show || (!options.port && !options.name && !options.reset)) {
+    if (options.allowedDirs) {
+      const dirs = (options.allowedDirs as string).split(',').map((d: string) => d.trim()).filter(Boolean);
+      config.allowedDirs = dirs;
+      console.log(chalk.green(`Allowed directories set to:`));
+      dirs.forEach((d: string) => console.log(chalk.cyan(`  - ${d}`)));
+    }
+
+    if (options.show || (!options.port && !options.name && !options.reset && !options.allowedDirs)) {
       const localIp = getLocalIp();
       const isCloud = config.relayMode === 'cloud';
       console.log(chalk.bold('\nCurrent Configuration:'));
@@ -99,6 +112,10 @@ program
         ? chalk.dim('Not configured')
         : config.startupEnabled ? chalk.green('Enabled') : chalk.yellow('Disabled');
       console.log(`  Startup:     ${startupStatus}`);
+      const allowedDirsStr = config.allowedDirs.length > 0
+        ? config.allowedDirs.map(d => chalk.cyan(`\n    - ${d}`)).join('')
+        : chalk.dim('None (home directory only)');
+      console.log(`  Allowed Dirs:${allowedDirsStr}`);
     }
   });
 
@@ -107,9 +124,11 @@ program
   .command('pair')
   .description('Generate pairing code to connect with mobile app')
   .option('--local', 'Use local network relay instead of cloud relay')
+  .option('--tunnel', 'Use cloudflared tunnel for public internet access')
   .action(async (options) => {
     const isLocal = options.local;
-    const spinner = createSpinner(isLocal ? 'Starting local relay server...' : 'Connecting to cloud relay...').start();
+    const useTunnel = options.tunnel;
+    const spinner = createSpinner(isLocal ? 'Starting local relay server...' : useTunnel ? 'Starting tunnel relay...' : 'Connecting to cloud relay...').start();
 
     try {
       // Ensure we have a deviceId
@@ -119,7 +138,54 @@ program
       const pairingCode = crypto.randomBytes(4).toString('hex').toUpperCase().slice(0, 8);
       config.pairingCode = pairingCode;
 
-      if (isLocal) {
+      if (useTunnel) {
+        // Tunnel mode: start local relay + cloudflared tunnel
+        config.relayMode = 'local';
+        config.tunnelProvider = 'cloudflared';
+        await wsClient.startServer(config.relayPort);
+        wsClient.setPairingCode(pairingCode);
+
+        // Start cloudflared tunnel
+        activeTunnel = new TunnelManager();
+        const tunnelUrl = await activeTunnel.start(config.relayPort);
+        config.tunnelUrl = tunnelUrl;
+
+        // Mobile expects wss:// format in QR code relay parameter
+        const relayUrl = tunnelUrl.replace('https://', 'wss://').replace('http://', 'ws://');
+
+        spinner.succeed(`Tunnel relay started\n`);
+
+        // Notify Supabase so mobile can auto-reconnect on tunnel restart
+        await TunnelNotifier.notifyTunnelUrl(config.deviceId!, tunnelUrl, pairingCode);
+
+        // QR includes tunnel URL
+        const pairingUrl = `forkoff://pair/${pairingCode}?relay=${encodeURIComponent(relayUrl)}`;
+        console.log(chalk.bold('Scan this QR code with the ForkOff mobile app:\n'));
+        qrcode.generate(pairingUrl, { small: true }, (code) => {
+          console.log(code);
+        });
+
+        console.log(chalk.bold('\nOr enter this code manually:\n'));
+        console.log(chalk.bgBlue.white.bold(`  ${pairingCode}  `));
+        console.log();
+        console.log(chalk.dim(`Tunnel: ${tunnelUrl}`));
+        console.log(chalk.dim(`Relay: ws://localhost:${config.relayPort} → ${relayUrl}`));
+
+        // Listen for tunnel URL changes and notify mobile
+        activeTunnel.on('url_changed', async (newUrl: string) => {
+          console.log(chalk.cyan(`[Tunnel] URL changed: ${newUrl}`));
+          config.tunnelUrl = newUrl;
+          await TunnelNotifier.notifyTunnelUrl(config.deviceId!, newUrl);
+        });
+
+        activeTunnel.on('error', async (err: Error) => {
+          console.log(chalk.red(`[Tunnel] Error: ${err.message}`));
+          if (err.message.includes('giving up')) {
+            await TunnelNotifier.markTunnelOffline(config.deviceId!);
+          }
+        });
+
+      } else if (isLocal) {
         // Local mode: start embedded relay server (existing behavior)
         config.relayMode = 'local';
         await wsClient.startServer(config.relayPort);
@@ -230,6 +296,7 @@ program
   .command('connect')
   .description('Reconnect to ForkOff (for previously paired devices)')
   .option('--local', 'Use local network relay instead of cloud relay')
+  .option('--tunnel', 'Use cloudflared tunnel for public internet access')
   .action(async (options) => {
     if (!config.deviceId) {
       console.log(chalk.yellow('Device not registered. Run "forkoff pair" first.'));
@@ -251,10 +318,44 @@ program
       }
     }
 
-    // Determine relay mode: explicit flag > saved config
-    const useLocal = options.local || config.relayMode === 'local';
+    const useTunnel = options.tunnel || config.tunnelProvider === 'cloudflared';
 
-    if (useLocal) {
+    if (useTunnel) {
+      // Tunnel mode: start local relay + cloudflared tunnel
+      config.relayMode = 'local';
+      config.tunnelProvider = 'cloudflared';
+      await wsClient.startServer(config.relayPort);
+      console.log(chalk.cyan(`Local relay server started on port ${config.relayPort}`));
+
+      // Start cloudflared tunnel
+      activeTunnel = new TunnelManager();
+      try {
+        const tunnelUrl = await activeTunnel.start(config.relayPort);
+        config.tunnelUrl = tunnelUrl;
+        console.log(chalk.green(`Tunnel started: ${tunnelUrl}`));
+
+        // Notify Supabase so mobile can connect / auto-reconnect
+        await TunnelNotifier.notifyTunnelUrl(config.deviceId!, tunnelUrl);
+
+        // Listen for tunnel URL changes
+        activeTunnel.on('url_changed', async (newUrl: string) => {
+          console.log(chalk.cyan(`[Tunnel] URL changed: ${newUrl}`));
+          config.tunnelUrl = newUrl;
+          await TunnelNotifier.notifyTunnelUrl(config.deviceId!, newUrl);
+        });
+
+        activeTunnel.on('error', async (err: Error) => {
+          console.log(chalk.red(`[Tunnel] Error: ${err.message}`));
+          if (err.message.includes('giving up')) {
+            await TunnelNotifier.markTunnelOffline(config.deviceId!);
+          }
+        });
+      } catch (err: any) {
+        console.log(chalk.red(`Failed to start tunnel: ${err.message}`));
+        console.log(chalk.yellow('Falling back to local mode...'));
+        activeTunnel = null;
+      }
+    } else if (options.local || config.relayMode === 'local') {
       // Local mode: start embedded relay server
       const localIp = getLocalIp();
       const relayUrl = `ws://${localIp}:${config.relayPort}`;
@@ -644,6 +745,16 @@ async function startConnection(): Promise<void> {
     // Claude is only spawned when the user actually sends a message (via user_message event)
     // This prevents duplicate transcript entries from double spawns
     wsClient.on('claude_resume_session', async (data: any) => {
+      // Prevent duplicate resume for the same session (avoid registration loop)
+      if (claudeProcessManager.isSessionTakenOver(data.terminalSessionId)) {
+        console.log(chalk.dim(`[Claude] Session ${data.sessionKey?.substring(0, 8)}... already registered, resending ready`));
+        wsClient.sendClaudeSessionEvent({
+          sessionKey: data.sessionKey,
+          event: { type: 'ready' },
+        });
+        return;
+      }
+
       console.log(chalk.cyan(`[Claude] Resume session request`));
 
       // Look up the correct directory from our locally scanned sessions
@@ -709,14 +820,9 @@ async function startConnection(): Promise<void> {
 
         // SECURITY: Normalize and validate path to prevent traversal attacks
         resolvedPath = path.resolve(resolvedPath);
-        const homeDir = os.homedir();
 
-        // SECURITY: Only allow access to directories under home directory
-        // This prevents accessing sensitive system files like /etc/passwd
-        // Uses path.relative() for cross-platform safety (handles Windows case-insensitivity)
-        const dirRelative = path.relative(homeDir, resolvedPath);
-        if (dirRelative.startsWith('..') || path.isAbsolute(dirRelative)) {
-          console.warn(chalk.yellow(`[Dir] Access denied — path outside home directory`));
+        if (!config.isPathAllowed(resolvedPath)) {
+          console.warn(chalk.yellow(`[Dir] Access denied — path not in allowed directories`));
           wsClient.sendDirectoryListResponse({ requestId: data.requestId, entries: [], currentPath: data.path });
           return;
         }
@@ -766,12 +872,8 @@ async function startConnection(): Promise<void> {
         }
         resolvedPath = path.resolve(resolvedPath);
 
-        // SECURITY: Only allow access under home directory
-        // Uses path.relative() for cross-platform safety (handles Windows case-insensitivity)
-        const homeDir = os.homedir();
-        const fileRelative = path.relative(homeDir, resolvedPath);
-        if (fileRelative.startsWith('..') || path.isAbsolute(fileRelative)) {
-          console.warn(chalk.yellow(`[File] Access denied — path outside home directory`));
+        if (!config.isPathAllowed(resolvedPath)) {
+          console.warn(chalk.yellow(`[File] Access denied — path not in allowed directories`));
           wsClient.sendReadFileResponse({
             requestId: data.requestId,
             exists: false,
@@ -1082,16 +1184,24 @@ async function startConnection(): Promise<void> {
           return;
         }
 
-        // Session not taken over — user must press "Take Over" first
-        console.log(chalk.yellow(`[Claude] Session not taken over: ${terminalSessionId} — watch-only mode`));
-        wsClient.sendClaudeSessionEvent({
-          sessionKey: terminalSessionId,
-          event: {
-            type: 'error',
-            message: 'You must take over this session before sending messages.',
-          },
-        });
-        return;
+        // Session was taken over before but cleared on reconnect — auto re-register
+        const knownSession = claudeSessionDetector.getSessions().find(s => s.sessionKey === terminalSessionId);
+        if (knownSession) {
+          console.log(chalk.cyan(`[Claude] Auto re-registering session ${terminalSessionId.substring(0, 8)}... after reconnect`));
+          const dir = knownSession.directory || data.directory;
+          claudeProcessManager.registerSession(terminalSessionId, dir, terminalSessionId, false, true, true);
+          claudeProcessManager.markTakenOver(terminalSessionId);
+        } else {
+          console.log(chalk.yellow(`[Claude] Session not taken over: ${terminalSessionId} — watch-only mode`));
+          wsClient.sendClaudeSessionEvent({
+            sessionKey: terminalSessionId,
+            event: {
+              type: 'error',
+              message: 'You must take over this session before sending messages.',
+            },
+          });
+          return;
+        }
       }
 
       console.log(chalk.dim(`[Claude] Sending to session: ${terminalSessionId}`));
@@ -1197,12 +1307,26 @@ async function startConnection(): Promise<void> {
       });
     });
 
+    wsClient.on('connected', () => {
+      claudeProcessManager.cancelSessionTTL();
+    });
+
     wsClient.on('disconnected', (reason) => {
       console.log(chalk.yellow(`\nMobile disconnected: ${reason}`));
-      console.log(chalk.dim('Waiting for mobile to reconnect...'));
       claudeProcessManager.resolveAllPendingPrompts('deny', 'mobile disconnected');
-      claudeProcessManager.cleanupAllPermissionState();
-      claudeProcessManager.clearAllTakenOver();
+
+      // Distinguish graceful disconnect (user closed app) from network interruption
+      const isGraceful = reason === 'client namespace disconnect';
+      if (isGraceful) {
+        claudeProcessManager.cleanupAllPermissionState();
+        claudeProcessManager.clearAllTakenOver();
+      } else {
+        // Network interruption — keep sessions for 5 min in case mobile reconnects
+        console.log(chalk.dim('Network interruption — keeping sessions for 5 min'));
+        claudeProcessManager.startSessionTTL(5 * 60 * 1000);
+      }
+
+      console.log(chalk.dim('Waiting for mobile to reconnect...'));
     });
 
     wsClient.on('session_release', (data: any) => {
@@ -1215,8 +1339,13 @@ async function startConnection(): Promise<void> {
     });
 
     // Keep the process running
-    process.on('SIGINT', () => {
+    process.on('SIGINT', async () => {
       console.log(chalk.yellow('\nDisconnecting...'));
+      if (activeTunnel) {
+        await TunnelNotifier.clearTunnelSession(config.deviceId!);
+        await activeTunnel.stop();
+        activeTunnel = null;
+      }
       claudeProcessManager.cleanupAllPermissionState();
       usageTracker.flush();
       claudeSessionDetector.stopWatching();

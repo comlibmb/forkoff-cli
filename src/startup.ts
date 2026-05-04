@@ -121,7 +121,7 @@ async function enableStartupWindows(binaryPath: string): Promise<void> {
   // WScript.Shell.Run with windowStyle 0 = hidden, False = don't wait.
   const vbsPath = getVbsPath();
   const escapedPath = cmdPath.replace(/"/g, '""');
-  const vbsContent = `CreateObject("WScript.Shell").Run """${escapedPath}"" connect --quiet", 0, False\r\n`;
+  const vbsContent = `CreateObject("WScript.Shell").Run """${escapedPath}"" connect --quiet --tunnel", 0, False\r\n`;
   fs.writeFileSync(vbsPath, vbsContent, { mode: 0o600 });
 
   // Use HKCU Run key — no admin required, runs on user logon

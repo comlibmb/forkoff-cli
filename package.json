@@ -56,6 +56,7 @@
   "license": "MIT",
   "dependencies": {
     "@noble/hashes": "^1.8.0",
+    "@supabase/supabase-js": "^2.105.1",
     "chalk": "^4.1.2",
     "chokidar": "^3.6.0",
     "commander": "^14.0.2",

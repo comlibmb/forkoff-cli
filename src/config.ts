@@ -60,6 +60,9 @@ interface DeviceConfig {
   relayMode: 'cloud' | 'local';
   relayToken: string | null;
   pairId: string | null;
+  allowedDirs: string[];
+  tunnelProvider: 'cloudflared' | null;
+  tunnelUrl: string | null;
 }
 
 const defaultConfig: DeviceConfig = {
@@ -76,6 +79,9 @@ const defaultConfig: DeviceConfig = {
   relayMode: 'cloud',
   relayToken: null,
   pairId: null,
+  allowedDirs: [],
+  tunnelProvider: null,
+  tunnelUrl: null,
 };
 
 class Config {
@@ -308,6 +314,59 @@ class Config {
   // Get config file path
   getPath(): string {
     return this.configPath;
+  }
+
+  get allowedDirs(): string[] {
+    return this.data.allowedDirs || [];
+  }
+
+  set allowedDirs(value: string[]) {
+    this.data.allowedDirs = value;
+    this.save();
+  }
+
+  get tunnelProvider(): 'cloudflared' | null {
+    return this.data.tunnelProvider;
+  }
+
+  set tunnelProvider(value: 'cloudflared' | null) {
+    this.data.tunnelProvider = value;
+    this.save();
+  }
+
+  get tunnelUrl(): string | null {
+    return this.data.tunnelUrl;
+  }
+
+  set tunnelUrl(value: string | null) {
+    this.data.tunnelUrl = value;
+    this.save();
+  }
+
+  /**
+   * Check if a resolved path is allowed for file/directory access.
+   * Path is allowed if it's under home directory or any configured allowedDirs entry.
+   */
+  isPathAllowed(resolvedPath: string): boolean {
+    const homeDir = os.homedir();
+    const isWin = os.platform() === 'win32';
+
+    // Check home directory
+    const relToHome = path.relative(homeDir, resolvedPath);
+    if (!(relToHome.startsWith('..') || path.isAbsolute(relToHome))) {
+      return true;
+    }
+
+    // Check whitelist
+    for (const allowedDir of this.allowedDirs) {
+      const normalizedAllowed = path.normalize(allowedDir);
+      const isUnder = isWin
+        ? resolvedPath.toLowerCase().startsWith(normalizedAllowed.toLowerCase())
+        : resolvedPath.startsWith(normalizedAllowed);
+      if (isUnder) return true;
+    }
+
+    return false;
   }
 }
 

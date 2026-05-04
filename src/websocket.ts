@@ -245,6 +245,10 @@ export class WebSocketClient extends EventEmitter {
   private _keyExchangePending = false;
   private _keyExchangeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private _keyExchangeDebounceTarget: string | null = null;
+  private _keyExchangeRetryCount = 0;
+  private _keyExchangeRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly KEY_EXCHANGE_MAX_RETRIES = 3;
+  private static readonly KEY_EXCHANGE_RETRY_DELAY_MS = 3000;
   // Queue for sensitive messages waiting for E2EE session establishment
   private pendingSensitiveMessages: PendingSensitiveMessage[] = [];
   private static readonly SENSITIVE_QUEUE_TTL_MS = 120_000; // 2 minutes max wait
@@ -315,7 +319,7 @@ export class WebSocketClient extends EventEmitter {
       // A fresh key exchange will re-establish the session after debounce.
       if (this.e2eePeerDeviceId) {
         console.log(`[E2EE] Clearing stale peer state (mobile reconnected)`);
-        this.e2eeManager?.clearSession(this.e2eePeerDeviceId);
+        this.e2eeManager?.resetPeerTrust(this.e2eePeerDeviceId);
         this.e2eePeerDeviceId = null;
       }
 

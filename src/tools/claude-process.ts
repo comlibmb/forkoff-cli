@@ -895,15 +895,11 @@ class ClaudeProcessManager extends EventEmitter {
       resolved = path.resolve(dir);
     }
 
-    // SECURITY: Prevent path traversal — resolved path must be under home directory
-    const homeDir = os.homedir();
     const normalized = path.normalize(resolved);
-    // On Windows, paths are case-insensitive — use lowercase comparison
-    const isUnderHome = os.platform() === 'win32'
-      ? normalized.toLowerCase().startsWith(homeDir.toLowerCase())
-      : normalized.startsWith(homeDir);
-    if (!isUnderHome) {
-      throw new Error('Invalid directory path: path traversal detected (must be under home directory)');
+
+    // Validate resolved path exists as absolute and has no traversal components
+    if (!path.isAbsolute(normalized) || normalized.includes('..')) {
+      throw new Error(`Invalid directory path: ${normalized}`);
     }
 
     return normalized;
@@ -1030,6 +1026,33 @@ class ClaudeProcessManager extends EventEmitter {
   clearAllTakenOver(): void {
     this.takenOverSessions.clear();
     console.log(`[Claude Process] All taken-over sessions cleared`);
+  }
+
+  private sessionTTLTimer: NodeJS.Timeout | null = null;
+
+  startSessionTTL(ttlMs: number): void {
+    this.cancelSessionTTL();
+    this.sessionTTLTimer = setTimeout(() => {
+      console.log('[ClaudeProcess] Session TTL expired, clearing');
+      this.clearAllTakenOver();
+      this.cleanupAllPermissionState();
+      this.sessionTTLTimer = null;
+    }, ttlMs);
+  }
+
+  cancelSessionTTL(): void {
+    if (this.sessionTTLTimer) {
+      clearTimeout(this.sessionTTLTimer);
+      this.sessionTTLTimer = null;
+    }
+  }
+
+  /**
+   * Check if a session is already registered/taken over.
+   * Used to prevent duplicate resume requests.
+   */
+  isSessionTakenOver(terminalSessionId: string): boolean {
+    return this.takenOverSessions.has(terminalSessionId);
   }
 
   /**
