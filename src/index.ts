@@ -1322,9 +1322,9 @@ async function startConnection(): Promise<void> {
         claudeProcessManager.cleanupAllPermissionState();
         claudeProcessManager.clearAllTakenOver();
       } else {
-        // Network interruption — keep sessions for 5 min in case mobile reconnects
-        console.log(chalk.dim('Network interruption — keeping sessions for 5 min'));
-        claudeProcessManager.startSessionTTL(5 * 60 * 1000);
+        // Network interruption — keep sessions for 30 min in case mobile reconnects
+        console.log(chalk.dim('Network interruption — keeping sessions for 30 min'));
+        claudeProcessManager.startSessionTTL(30 * 60 * 1000);
       }
 
       console.log(chalk.dim('Waiting for mobile to reconnect...'));
